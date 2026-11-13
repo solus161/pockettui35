@@ -183,6 +183,8 @@ fn type_name(ty: ItemType) -> &'static str {
 pub struct Tree {
     items: HashMap<String, Item>,
     children: HashMap<String, Vec<String>>,
+    /// Each item's folder, after bad parents fell back to Home.
+    parents: HashMap<String, String>,
     /// Problems found while loading. Shown to the user, never fatal.
     pub warnings: Vec<String>,
 }
@@ -190,6 +192,11 @@ pub struct Tree {
 impl Tree {
     pub fn get(&self, id: &str) -> Option<&Item> {
         self.items.get(id)
+    }
+
+    /// The folder an item sits in. `None` for Home and unknown ids.
+    pub fn parent(&self, id: &str) -> Option<&str> {
+        self.parents.get(id).map(String::as_str)
     }
 
     /// Children of a folder, pinned first, then alphabetical by label.
@@ -259,9 +266,9 @@ impl Tree {
         // 2. Attach each item to its parent. A bad parent falls back to Home
         //    so the item is not lost.
         let mut children: HashMap<String, Vec<String>> = HashMap::new();
-        let mut ids: Vec<&String> = items.keys().collect();
+        let mut ids: Vec<String> = items.keys().cloned().collect();
         ids.sort();
-        for id in ids {
+        for id in &ids {
             let parent = &parents[id];
             let ok = parent == HOME || items.get(parent).is_some_and(Item::is_folder);
             let parent = if ok {
@@ -275,7 +282,8 @@ impl Tree {
                 warnings.push(format!("item.{id}: parent `{parent}` {why}, shown in Home"));
                 HOME.to_string()
             };
-            children.entry(parent).or_default().push(id.clone());
+            children.entry(parent.clone()).or_default().push(id.clone());
+            parents.insert(id.clone(), parent);
         }
 
         // 3. Drop folders not reachable from Home (parent cycles).
@@ -294,6 +302,7 @@ impl Tree {
             warnings.push(format!("item.{id}: in a parent cycle, not shown"));
         }
         items.retain(|id, _| reachable.contains(id));
+        parents.retain(|id, _| reachable.contains(id));
         children.retain(|f, _| f == HOME || reachable.contains(f));
 
         // 4. Sort: pinned first, then by label, case-insensitive.
@@ -307,6 +316,7 @@ impl Tree {
         Self {
             items,
             children,
+            parents,
             warnings,
         }
     }

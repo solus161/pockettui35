@@ -4,6 +4,7 @@
 
 mod app;
 mod config;
+mod history;
 mod items;
 mod ui;
 

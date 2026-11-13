@@ -208,16 +208,21 @@ Item types:
 **Navigation.** Up/Down move. A opens or runs. B goes back; at Home it
 clears the search. Left/Right only adjust `value` and `choice` items. The
 hint bar names what each button does for the selected item. Each folder
-remembers its cursor position.
+remembers its cursor position. Coming back from a folder seen for the first
+time selects that folder. The menu title is a breadcrumb: `Home / Settings`.
 
 **Confirmation.** Reboot and Shut down ask "Press A again", and cancel after
 3 s.
 
 **Sorting.** Each folder shows pinned items first (`pin = true`), then
 everything else alphabetically. Home also has a **Recent** group on top: the
-last 3-5 items launched, from anywhere in the tree. The alphabetical part
-never reorders, so it can be learned by position. Last-used times live in
-`~/.local/state/pockettui35/history.toml`.
+last 5 apps and scripts launched, from anywhere in the tree. Folders,
+settings and power actions never enter it. A recent item that lives in a
+folder shows that folder's name on the right. Recent items also stay in
+their place in the main list, so the main list never reorders and can be
+learned by position. Last-used times live in
+`$XDG_STATE_HOME/pockettui35/history.toml` (default
+`~/.local/state/...`). A missing or broken file just means an empty Recent.
 
 ### Power profile
 

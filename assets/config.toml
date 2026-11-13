@@ -1,0 +1,123 @@
+# pockettui35 shipped items.
+#
+# Installed as /usr/share/pockettui35/config.toml. User items go in
+# ~/.config/pockettui35/config.toml with the same schema. A user entry with a
+# shipped id merges into it field by field; `hidden = true` removes it.
+#
+# Fields:
+#   label        text shown in the menu (required)
+#   type         folder | app | script | value | choice | action (required)
+#   parent       id of a folder; default "home"
+#   pin          true sorts the item first in its folder
+#   hidden       true removes the item, and everything under a folder
+#   kind         app only: tty | wayland | kms
+#   exec         app and script: command line, run through sh
+#   raw_buttons  app only: send F13-F22 unmapped (games)
+#   builtin      value: volume | brightness
+#                choice: power_profile
+#                action: screen_off | reboot | shutdown | about
+#   confirm      action only: press A twice
+
+# --- Home ---------------------------------------------------------------
+
+[item.browser]
+label = "Chromium"
+type  = "app"
+kind  = "wayland"
+exec  = "chromium --ozone-platform=wayland --force-device-scale-factor=0.75"
+
+[item.files]
+label = "Files"
+type  = "app"
+kind  = "tty"
+exec  = "yazi"
+
+[item.terminal]
+label = "Terminal"
+type  = "app"
+kind  = "tty"
+exec  = "${SHELL:-/bin/bash} -l"
+
+[item.games]
+label       = "Games"
+type        = "app"
+kind        = "wayland"
+exec        = "retroarch"
+raw_buttons = true
+
+[item.settings]
+label = "Settings"
+type  = "folder"
+
+[item.power]
+label = "Power"
+type  = "folder"
+
+# --- Settings -----------------------------------------------------------
+
+[item.wifi]
+label  = "Wi-Fi"
+type   = "app"
+kind   = "tty"
+exec   = "nmtui"
+parent = "settings"
+
+[item.bluetooth]
+label  = "Bluetooth"
+type   = "app"
+kind   = "tty"
+exec   = "bluetoothctl"
+parent = "settings"
+
+[item.volume]
+label   = "Volume"
+type    = "value"
+builtin = "volume"
+parent  = "settings"
+
+[item.brightness]
+label   = "Brightness"
+type    = "value"
+builtin = "brightness"
+parent  = "settings"
+
+[item.power_profile]
+label   = "Power profile"
+type    = "choice"
+builtin = "power_profile"
+parent  = "settings"
+
+[item.raspi_config]
+label  = "Raspberry Pi config"
+type   = "app"
+kind   = "tty"
+exec   = "sudo raspi-config"
+parent = "settings"
+
+[item.about]
+label   = "About"
+type    = "action"
+builtin = "about"
+parent  = "settings"
+
+# --- Power --------------------------------------------------------------
+
+[item.screen_off]
+label   = "Screen off"
+type    = "action"
+builtin = "screen_off"
+parent  = "power"
+
+[item.reboot]
+label   = "Reboot"
+type    = "action"
+builtin = "reboot"
+confirm = true
+parent  = "power"
+
+[item.shutdown]
+label   = "Shut down"
+type    = "action"
+builtin = "shutdown"
+confirm = true
+parent  = "power"

@@ -1,9 +1,10 @@
 //! pockettui35: a single-tasking launcher for the PocketTerm35.
 //!
-//! See `docs/design.md`. Step 1: skeleton with a blocking event loop and the
-//! four layout areas, static content.
+//! See `docs/design.md`.
 
 mod app;
+mod config;
+mod items;
 mod ui;
 
 use std::io;

@@ -22,7 +22,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_status(f, status);
     draw_search(f, search);
     draw_menu(f, menu, app);
-    draw_hints(f, hints);
+    draw_hints(f, hints, app);
 }
 
 fn draw_status(f: &mut Frame, area: Rect) {
@@ -47,10 +47,31 @@ fn draw_search(f: &mut Frame, area: Rect) {
 }
 
 fn draw_menu(f: &mut Frame, area: Rect, app: &App) {
+    let title = match app.tree.get(&app.folder) {
+        Some(folder) => format!(" {} ", folder.label),
+        None => " Home ".to_string(),
+    };
     let block = Block::new()
         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-        .title(" Home ");
-    let items: Vec<ListItem> = app.items.iter().map(|s| ListItem::new(*s)).collect();
+        .title(title);
+
+    // Inner width minus the 2-column highlight symbol.
+    let width = usize::from(area.width.saturating_sub(2 + 2));
+    let items: Vec<ListItem> = app
+        .tree
+        .children(&app.folder)
+        .iter()
+        .filter_map(|id| app.tree.get(id))
+        .map(|item| {
+            if item.is_folder() {
+                let label = &item.label;
+                let pad = width.saturating_sub(label.chars().count() + 2);
+                ListItem::new(format!("{label}{:pad$}> ", ""))
+            } else {
+                ListItem::new(item.label.as_str())
+            }
+        })
+        .collect();
     let list = List::new(items)
         .block(block)
         .highlight_symbol("> ")
@@ -60,16 +81,26 @@ fn draw_menu(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_hints(f: &mut Frame, area: Rect) {
+fn draw_hints(f: &mut Frame, area: Rect, app: &App) {
     let key = Style::new().fg(Color::Black).bg(Color::Cyan);
-    let hints = Line::from(vec![
+    let mut hints = vec![
         Span::styled(" A ", key),
         Span::raw(" open  "),
         Span::styled(" B ", key),
         Span::raw(" back  "),
         Span::raw(" type to search"),
-    ]);
-    f.render_widget(Paragraph::new(hints), area);
+    ];
+    // Config problems never stop the launcher, but must not go unnoticed.
+    // A screen to read them comes later.
+    let n = app.tree.warnings.len();
+    if n > 0 {
+        let s = if n == 1 { "" } else { "s" };
+        hints.push(Span::styled(
+            format!("   ! {n} config warning{s}"),
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(hints)), area);
 }
 
 #[cfg(test)]
@@ -81,7 +112,13 @@ mod tests {
     #[test]
     fn renders_at_device_size() {
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
-        let app = App::new();
+        // Shipped config only, so the test does not depend on the machine's
+        // ~/.config.
+        let (merged, warnings) = crate::config::merge_layers(&[crate::config::Layer {
+            name: "shipped".into(),
+            text: crate::config::SHIPPED.into(),
+        }]);
+        let app = App::with_tree(crate::items::Tree::build(merged, warnings));
         terminal.draw(|f| draw(f, &app)).unwrap();
         let buf = terminal.backend().buffer();
         let text: String = (0..buf.area.height)
@@ -95,5 +132,7 @@ mod tests {
         println!("{text}");
         assert!(text.contains("> Chromium"));
         assert!(text.contains("Home"));
+        assert!(text.contains("Settings") && text.contains("> │"));
+        assert!(!text.contains("config warning"));
     }
 }

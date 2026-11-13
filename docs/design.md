@@ -280,8 +280,14 @@ Ratatui on the crossterm backend, on the Linux console.
 
 ### Config
 
-TOML, the same layering as pt35-desktop: a shipped file in
-`/usr/share/pockettui35/`, merged with `~/.config/pockettui35/`.
+TOML, two layers, lowest first:
+
+1. Shipped: `/usr/share/pockettui35/config.toml`. If that file is absent, the
+   copy built into the binary (`assets/config.toml`) is used.
+2. User: `$XDG_CONFIG_HOME/pockettui35/config.toml`, default
+   `~/.config/pockettui35/config.toml`.
+
+`assets/config.toml` documents every field.
 
 Shipped items and user items use the same schema. An item goes in Home
 unless it names a `parent`.
@@ -322,8 +328,18 @@ parent = "settings"
 
 - **Custom items.** Install an app, add an `[item.*]` for it in
   `~/.config/pockettui35/`, and it shows up among the apps on Home.
-- **Overrides.** A user item with a shipped item's id replaces it.
-  `hidden = true` removes a shipped item.
+- **Overrides.** A user item with a shipped item's id merges into it field
+  by field, so `[item.files] exec = "ranger"` changes only the command. If
+  the user entry changes `type`, it replaces the item instead.
+- **Hiding.** `hidden = true` removes an item. On a folder it removes
+  everything under it.
+- **Built-ins.** `value`, `choice` and `action` items name a `builtin`:
+  `volume`, `brightness`, `power_profile`, `screen_off`, `reboot`,
+  `shutdown`, `about`. `confirm = true` asks for A twice.
+- **Errors never stop the launcher.** A file that fails to parse is skipped.
+  An invalid item (missing field, unknown field, wrong `builtin`) is
+  skipped. An item whose `parent` is missing or not a folder shows in Home.
+  Each problem becomes a warning, counted in the hint bar.
 - **Reload.** The config is re-read each time the launcher regains the
   screen. No restart.
 - **No `icon` field.** The console font has no Nerd Font glyphs.

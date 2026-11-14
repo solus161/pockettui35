@@ -27,12 +27,13 @@ const CAGE: &str = "cage";
 pub fn run(terminal: &mut ratatui::DefaultTerminal, item: &Item) -> Option<String> {
     let (kind, exec) = match &item.action {
         Action::App { kind, exec, .. } => (*kind, exec.as_str()),
-        // Built-ins: step 7.
-        Action::Builtin { .. } => return Some(format!("{}: not supported yet", item.label)),
-        // Scripts keep the screen (see `script.rs`); the rest do not launch.
-        Action::Script { .. } | Action::Folder | Action::Value(_) | Action::Choice(_) => {
-            return None;
-        }
+        // Only apps give up the screen. Scripts and built-ins run inside the
+        // launcher (`script.rs`, `App::run_builtin`).
+        Action::Script { .. }
+        | Action::Builtin { .. }
+        | Action::Folder
+        | Action::Value(_)
+        | Action::Choice(_) => return None,
     };
 
     let mut cmd = command(kind, exec);

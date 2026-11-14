@@ -3,14 +3,50 @@
 //! Buttons arrive as keys through keyd: A is Enter, B is Escape.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config;
+use crate::cpufreq::Profile;
 use crate::history::History;
-use crate::items::{Action, HOME, Item, Tree};
+use crate::items::{Action, Builtin, HOME, Item, Tree};
 use crate::script::ScriptRun;
 use crate::search::{Hit, Search};
+use crate::system::{PowerAction, System, Volume};
+
+/// How long "press A again" waits for the second press.
+pub const CONFIRM_WINDOW: Duration = Duration::from_secs(3);
+
+/// Volume changes in steps of this many percent.
+const VOLUME_STEP: u8 = 5;
+/// Brightness changes in steps of this many percent.
+const BRIGHTNESS_STEP: u8 = 10;
+/// The firmware's floor; asking for less gets this.
+const BRIGHTNESS_MIN: u8 = 5;
+
+/// The About screen: a script with no item behind it.
+const ABOUT_EXEC: &str = concat!(
+    "echo 'pockettui35 ",
+    env!("CARGO_PKG_VERSION"),
+    "'; echo; ",
+    "tr -d '\\0' < /proc/device-tree/model 2>/dev/null && echo; ",
+    "uname -sr; ",
+    "echo \"host    $(hostname)\"; ",
+    "echo \"address $(hostname -I 2>/dev/null)\"; ",
+    "echo \"up      $(uptime -p 2>/dev/null)\""
+);
+
+/// Settings and status read from the system. Refreshed after the first
+/// frame, on return from an app, on entering a folder, and (network and
+/// profile) each minute.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Values {
+    pub volume: Option<Volume>,
+    pub brightness: Option<u8>,
+    pub profile: Option<Profile>,
+    pub net: Option<String>,
+}
 
 /// Most items shown in the Recent group.
 pub const RECENT_MAX: usize = 5;
@@ -64,14 +100,20 @@ pub struct App {
     before_search: Option<RowKey>,
     /// The script output screen, shown over the menu while `Some`.
     pub script: Option<ScriptRun>,
+    system: Box<dyn System>,
+    pub values: Values,
+    /// An item waiting for its second A, and when the first came.
+    pub confirm: Option<(String, Instant)>,
+    /// The screen is off; the next key only turns it back on.
+    pub blanked: bool,
 }
 
 impl App {
-    pub fn new() -> Self {
-        Self::with(config::load(), History::load())
+    pub fn new(system: Box<dyn System>) -> Self {
+        Self::with(config::load(), History::load(), system)
     }
 
-    pub fn with(tree: Tree, history: History) -> Self {
+    pub fn with(tree: Tree, history: History, system: Box<dyn System>) -> Self {
         let mut app = Self {
             should_quit: false,
             tree,
@@ -86,6 +128,10 @@ impl App {
             search: Search::new(),
             before_search: None,
             script: None,
+            system,
+            values: Values::default(),
+            confirm: None,
+            blanked: false,
         };
         app.fix_selection();
         app
@@ -95,6 +141,71 @@ impl App {
     /// exist. Called each time the launcher gets the screen back.
     pub fn reload(&mut self) {
         self.set_tree(config::load());
+        // A keyboard replugged or reflashed meanwhile is worth asking again.
+        self.system.rescan();
+        self.refresh_values();
+    }
+
+    /// Reads every setting and the status bar from the system.
+    pub fn refresh_values(&mut self) {
+        self.values = Values {
+            volume: self.system.volume(),
+            brightness: self.system.brightness(),
+            profile: self.system.power_profile(),
+            net: self.system.network(),
+        };
+    }
+
+    /// The minute tick: the status bar's network and profile. Volume and
+    /// brightness are left alone; asking the keyboard every minute is not
+    /// free.
+    pub fn on_minute(&mut self) {
+        self.values.net = self.system.network();
+        self.values.profile = self.system.power_profile();
+    }
+
+    /// When the main loop must wake even without input: the end of a
+    /// confirmation window.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.confirm.as_ref().map(|(_, at)| *at + CONFIRM_WINDOW)
+    }
+
+    /// Expires a confirmation whose window has passed. Returns true if the
+    /// screen changed.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        if self.deadline().is_some_and(|d| now >= d) {
+            self.confirm = None;
+            self.message = None;
+            return true;
+        }
+        false
+    }
+
+    /// Right-hand text for a `value` or `choice` row.
+    pub fn value_text(&self, item: &Item) -> Option<String> {
+        let bar = |p: u8| {
+            let filled = usize::from(p.div_ceil(10));
+            format!("[{}{}]", "━".repeat(filled), "─".repeat(10 - filled))
+        };
+        match item.action {
+            Action::Value(Builtin::Volume) => Some(match self.values.volume {
+                Some(Volume {
+                    percent,
+                    muted: true,
+                }) => format!("{} {percent:>3}% muted", bar(percent)),
+                Some(v) => format!("{} {:>3}%", bar(v.percent), v.percent),
+                None => "n/a".into(),
+            }),
+            Action::Value(Builtin::Brightness) => Some(match self.values.brightness {
+                Some(b) => format!("{} {b:>3}%", bar(b)),
+                None => "n/a".into(),
+            }),
+            Action::Choice(Builtin::PowerProfile) => Some(match self.values.profile {
+                Some(p) => format!("< {} >", p.label()),
+                None => "< custom >".into(),
+            }),
+            _ => None,
+        }
     }
 
     fn set_tree(&mut self, tree: Tree) {
@@ -173,7 +284,17 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        // The key that wakes the screen does nothing else.
+        if self.blanked {
+            self.blanked = false;
+            self.system.blank(false);
+            return;
+        }
         self.message = None;
+        // Any key but a second A cancels a pending confirmation.
+        if key.code != KeyCode::Enter {
+            self.confirm = None;
+        }
         // Dev escape hatch. On the device the launcher never quits.
         if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
@@ -186,6 +307,8 @@ impl App {
         match key.code {
             KeyCode::Up => self.move_by(-1),
             KeyCode::Down => self.move_by(1),
+            KeyCode::Left => self.adjust(-1),
+            KeyCode::Right => self.adjust(1),
             KeyCode::Home => self.move_by(isize::MIN),
             KeyCode::End => self.move_by(isize::MAX),
             KeyCode::Enter => self.activate(),
@@ -333,7 +456,90 @@ impl App {
                 let label = self.tree.get(&id).map_or("", |i| i.label.as_str());
                 self.script = Some(ScriptRun::start(&id, label, &exec));
             }
-            Action::Builtin { .. } => self.pending = Some(id),
+            Action::Builtin { builtin, confirm } => self.run_builtin(&id, builtin, confirm),
+        }
+    }
+
+    fn run_builtin(&mut self, id: &str, builtin: Builtin, confirm: bool) {
+        if confirm {
+            let confirmed = self
+                .confirm
+                .take()
+                .is_some_and(|(c, at)| c == id && at.elapsed() < CONFIRM_WINDOW);
+            if !confirmed {
+                let label = self.tree.get(id).map_or(id, |i| i.label.as_str());
+                self.message = Some(format!("Press A again to {}", label.to_lowercase()));
+                self.confirm = Some((id.to_string(), Instant::now()));
+                return;
+            }
+        }
+        match builtin {
+            Builtin::Reboot | Builtin::Shutdown => {
+                let (action, doing) = if builtin == Builtin::Reboot {
+                    (PowerAction::Reboot, "Rebooting")
+                } else {
+                    (PowerAction::Shutdown, "Shutting down")
+                };
+                self.message = Some(match self.system.power(action) {
+                    Ok(()) => format!("{doing}..."),
+                    Err(e) => format!("{doing} failed: {e}"),
+                });
+            }
+            Builtin::ScreenOff => {
+                self.system.blank(true);
+                self.blanked = true;
+            }
+            Builtin::About => self.script = Some(ScriptRun::start("about", "About", ABOUT_EXEC)),
+            // Values and choices are adjusted, not run.
+            Builtin::Volume | Builtin::Brightness | Builtin::PowerProfile => {}
+        }
+    }
+
+    /// Left (`-1`) or Right (`1`) on the selected row: changes a `value` or
+    /// `choice` in place.
+    fn adjust(&mut self, dir: i8) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let label = item.label.clone();
+        match item.action {
+            Action::Value(Builtin::Volume) => {
+                let Some(cur) = self.values.volume else {
+                    self.message = Some(format!("{label}: not available"));
+                    return;
+                };
+                let next = step(cur.percent, dir, VOLUME_STEP, 0);
+                self.values.volume = self.system.set_volume(next);
+                if self.values.volume.is_none() {
+                    self.message = Some(format!("{label}: could not set"));
+                }
+            }
+            Action::Value(Builtin::Brightness) => {
+                let Some(cur) = self.values.brightness else {
+                    self.message = Some(format!("{label}: keyboard firmware not answering"));
+                    return;
+                };
+                let next = step(cur, dir, BRIGHTNESS_STEP, BRIGHTNESS_MIN);
+                self.values.brightness = self.system.set_brightness(next);
+                if self.values.brightness.is_none() {
+                    self.message = Some(format!("{label}: could not set"));
+                }
+            }
+            Action::Choice(Builtin::PowerProfile) => {
+                // From "custom", either way lands on balanced first.
+                let next = self
+                    .values
+                    .profile
+                    .map_or(Profile::Balanced, |p| p.step(dir));
+                if self.values.profile == Some(next) {
+                    return;
+                }
+                if let Err(e) = self.system.set_power_profile(next) {
+                    self.message = Some(format!("{label}: {e}"));
+                }
+                self.values.profile = self.system.power_profile();
+            }
+            _ => {}
         }
     }
 
@@ -359,6 +565,8 @@ impl App {
 
     fn enter(&mut self, folder: &str) {
         self.show(folder);
+        // Settings may have changed behind our back (Fn keys, other tools).
+        self.refresh_values();
     }
 
     /// Switches folder, saving the cursor of the old one and restoring the
@@ -382,6 +590,17 @@ impl App {
     }
 }
 
+/// One step up or down from `cur`, snapped to multiples of `size` (42 goes
+/// to 45 or 40 in steps of 5), kept in `min..=100`.
+fn step(cur: u8, dir: i8, size: u8, min: u8) -> u8 {
+    let next = if dir > 0 {
+        (cur / size + 1) * size
+    } else {
+        cur.div_ceil(size).saturating_sub(1) * size
+    };
+    next.clamp(min, 100)
+}
+
 /// Items that count as "used" and can appear in Recent.
 fn is_launchable(item: &Item) -> bool {
     matches!(item.action, Action::App { .. } | Action::Script { .. })
@@ -398,7 +617,11 @@ mod tests {
             name: "shipped".into(),
             text: SHIPPED.into(),
         }]);
-        App::with(Tree::build(merged, warnings), History::in_memory())
+        App::with(
+            Tree::build(merged, warnings),
+            History::in_memory(),
+            Box::new(crate::system::fake::Fake::working()),
+        )
     }
 
     fn press(app: &mut App, code: KeyCode) {
@@ -690,7 +913,11 @@ mod tests {
         ]);
         let tree = Tree::build(merged, warnings);
         assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
-        App::with(tree, History::in_memory())
+        App::with(
+            tree,
+            History::in_memory(),
+            Box::new(crate::system::fake::Fake::working()),
+        )
     }
 
     fn wait_script(a: &mut App) {
@@ -772,5 +999,179 @@ mod tests {
         assert_eq!(a.script.as_ref().unwrap().from_bottom, 0);
         press(&mut a, KeyCode::Down);
         assert_eq!(a.script.as_ref().unwrap().from_bottom, 0);
+    }
+
+    use crate::system::fake::Fake;
+
+    /// The shipped app on a fake system, values loaded, plus a handle on
+    /// the fake's state.
+    fn app_fake() -> (App, Fake) {
+        let fake = Fake::working();
+        let (merged, warnings) = merge_layers(&[Layer {
+            name: "shipped".into(),
+            text: SHIPPED.into(),
+        }]);
+        let mut a = App::with(
+            Tree::build(merged, warnings),
+            History::in_memory(),
+            Box::new(fake.clone()),
+        );
+        a.refresh_values();
+        (a, fake)
+    }
+
+    fn open_settings_at(a: &mut App, id: &str) {
+        go_to(a, "settings");
+        press(a, KeyCode::Enter);
+        go_to(a, id);
+    }
+
+    #[test]
+    fn steps_snap_and_clamp() {
+        assert_eq!(step(42, 1, 5, 0), 45);
+        assert_eq!(step(42, -1, 5, 0), 40);
+        assert_eq!(step(40, -1, 5, 0), 35);
+        assert_eq!(step(100, 1, 5, 0), 100);
+        assert_eq!(step(0, -1, 5, 0), 0);
+        assert_eq!(step(10, -1, 10, 5), 5);
+        assert_eq!(step(5, 1, 10, 5), 10);
+    }
+
+    #[test]
+    fn left_right_adjust_volume() {
+        let (mut a, fake) = app_fake();
+        open_settings_at(&mut a, "volume");
+        press(&mut a, KeyCode::Right);
+        press(&mut a, KeyCode::Right);
+        press(&mut a, KeyCode::Left);
+        assert_eq!(a.values.volume.unwrap().percent, 45);
+        assert_eq!(
+            fake.0.borrow().calls,
+            ["volume 45", "volume 50", "volume 45"]
+        );
+        let item = a.selected_item().unwrap().clone();
+        assert_eq!(a.value_text(&item).unwrap(), "[━━━━━─────]  45%");
+    }
+
+    #[test]
+    fn brightness_respects_the_floor_and_silence() {
+        let (mut a, fake) = app_fake();
+        open_settings_at(&mut a, "brightness");
+        for _ in 0..12 {
+            press(&mut a, KeyCode::Left);
+        }
+        assert_eq!(a.values.brightness, Some(5));
+
+        // Stock firmware: no change attempted, a message instead.
+        fake.0.borrow_mut().brightness = None;
+        a.refresh_values();
+        fake.0.borrow_mut().calls.clear();
+        press(&mut a, KeyCode::Right);
+        assert!(fake.0.borrow().calls.is_empty());
+        assert!(a.message.as_deref().unwrap().contains("not answering"));
+        let item = a.selected_item().unwrap().clone();
+        assert_eq!(a.value_text(&item).unwrap(), "n/a");
+    }
+
+    #[test]
+    fn power_profile_steps_and_reports_errors() {
+        let (mut a, fake) = app_fake();
+        open_settings_at(&mut a, "power_profile");
+        press(&mut a, KeyCode::Right);
+        assert_eq!(a.values.profile, Some(Profile::Performance));
+        // At the end: nothing to do.
+        press(&mut a, KeyCode::Right);
+        assert_eq!(fake.0.borrow().calls, ["profile performance"]);
+
+        fake.0.borrow_mut().profile_error = Some("needs the sudoers rule".into());
+        press(&mut a, KeyCode::Left);
+        assert_eq!(a.values.profile, Some(Profile::Performance));
+        assert_eq!(
+            a.message.as_deref(),
+            Some("Power profile: needs the sudoers rule")
+        );
+    }
+
+    #[test]
+    fn left_right_do_nothing_on_other_items() {
+        let (mut a, fake) = app_fake();
+        press(&mut a, KeyCode::Right);
+        press(&mut a, KeyCode::Left);
+        assert!(fake.0.borrow().calls.is_empty());
+        assert!(a.pending.is_none());
+    }
+
+    #[test]
+    fn reboot_needs_a_second_a() {
+        let (mut a, fake) = app_fake();
+        go_to(&mut a, "power");
+        press(&mut a, KeyCode::Enter);
+        go_to(&mut a, "reboot");
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.message.as_deref(), Some("Press A again to reboot"));
+        assert!(fake.0.borrow().calls.is_empty());
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(fake.0.borrow().calls, ["power Reboot"]);
+        assert_eq!(a.message.as_deref(), Some("Rebooting..."));
+    }
+
+    #[test]
+    fn another_key_or_time_cancels_the_confirmation() {
+        let (mut a, fake) = app_fake();
+        go_to(&mut a, "power");
+        press(&mut a, KeyCode::Enter);
+        go_to(&mut a, "shutdown");
+
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Up);
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Enter);
+        assert!(fake.0.borrow().calls.is_empty(), "moving away cancelled it");
+
+        // The window runs out.
+        let first = a.confirm.as_ref().unwrap().1;
+        assert!(!a.tick(first));
+        assert!(a.tick(first + CONFIRM_WINDOW));
+        assert!(a.confirm.is_none() && a.message.is_none());
+        press(&mut a, KeyCode::Enter);
+        assert!(fake.0.borrow().calls.is_empty(), "a fresh first press");
+    }
+
+    #[test]
+    fn screen_off_and_the_waking_key_is_swallowed() {
+        let (mut a, fake) = app_fake();
+        go_to(&mut a, "power");
+        press(&mut a, KeyCode::Enter);
+        go_to(&mut a, "screen_off");
+        press(&mut a, KeyCode::Enter);
+        assert!(a.blanked && fake.0.borrow().blanked);
+
+        press(&mut a, KeyCode::Esc);
+        assert!(!a.blanked && !fake.0.borrow().blanked);
+        assert_eq!(a.folder, "power", "B only woke the screen");
+    }
+
+    #[test]
+    fn about_opens_an_info_screen() {
+        let (mut a, _) = app_fake();
+        open_settings_at(&mut a, "about");
+        press(&mut a, KeyCode::Enter);
+        wait_script(&mut a);
+        let run = a.script.as_ref().unwrap();
+        assert_eq!(run.label, "About");
+        assert!(run.succeeded(), "{}", run.summary());
+        let lines = run.output.lines();
+        assert_eq!(lines[0], concat!("pockettui35 ", env!("CARGO_PKG_VERSION")));
+        assert!(lines.iter().any(|l| l.starts_with("host ")), "{lines:?}");
+    }
+
+    #[test]
+    fn minute_refreshes_network_only() {
+        let (mut a, fake) = app_fake();
+        fake.0.borrow_mut().net = Some("wired".into());
+        fake.0.borrow_mut().volume = None;
+        a.on_minute();
+        assert_eq!(a.values.net.as_deref(), Some("wired"));
+        assert!(a.values.volume.is_some(), "volume not re-read each minute");
     }
 }

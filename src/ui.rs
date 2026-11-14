@@ -20,7 +20,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             Constraint::Length(1),
         ])
         .areas(f.area());
-        draw_status(f, status);
+        draw_status(f, status, app);
         draw_script(f, body, run);
         draw_script_hints(f, hints, run);
         return;
@@ -33,19 +33,23 @@ pub fn draw(f: &mut Frame, app: &App) {
     ])
     .areas(f.area());
 
-    draw_status(f, status);
+    draw_status(f, status, app);
     draw_search(f, search, app);
     draw_menu(f, menu, app);
     draw_hints(f, hints, app);
 }
 
-fn draw_status(f: &mut Frame, area: Rect) {
+fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let [left, right] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).areas(area);
     let style = Style::new().fg(Color::Black).bg(Color::Gray);
 
-    // Static until step 7 (NetworkManager, power profile).
-    f.render_widget(Paragraph::new(" wlan0 --   balanced").style(style), left);
+    let net = app.values.net.as_deref().unwrap_or("net ?");
+    let profile = app.values.profile.map_or("custom", |p| p.label());
+    f.render_widget(
+        Paragraph::new(format!(" {net}   {profile}")).style(style),
+        left,
+    );
 
     let clock = Local::now().format("%a %d %b  %H:%M ").to_string();
     f.render_widget(Paragraph::new(clock).style(style).right_aligned(), right);
@@ -194,16 +198,25 @@ fn draw_menu(f: &mut Frame, area: Rect, app: &App) {
                 };
                 // Right column: `>` for folders; in Recent and in search
                 // results, the folder an item lives in when that is not Home.
+                // Right column: `>` for folders, the value for settings, and
+                // in Recent and search results the folder an item lives in
+                // when that is not Home.
+                let folder = (key.recent || app.searching())
+                    .then(|| app.tree.parent(&item.id))
+                    .flatten()
+                    .filter(|p| *p != HOME)
+                    .and_then(|p| app.tree.get(p))
+                    .map(|p| p.label.as_str());
                 let right = if item.is_folder() {
                     Some(Span::raw("> "))
-                } else if key.recent || app.searching() {
-                    app.tree
-                        .parent(&item.id)
-                        .filter(|p| *p != HOME)
-                        .and_then(|p| app.tree.get(p))
-                        .map(|p| Span::styled(format!("{} ", p.label), dim))
+                } else if let Some(value) = app.value_text(item) {
+                    let text = match folder {
+                        Some(f) => format!("{value}   {f} "),
+                        None => format!("{value} "),
+                    };
+                    Some(Span::raw(text))
                 } else {
-                    None
+                    folder.map(|f| Span::styled(format!("{f} "), dim))
                 };
                 let indices = app
                     .hits
@@ -306,6 +319,7 @@ mod tests {
         let mut app = App::with(
             crate::items::Tree::build(merged, warnings),
             crate::history::History::in_memory(),
+            Box::new(crate::system::fake::Fake::working()),
         );
         app.history.record("wifi");
         app.history.record("browser");
@@ -339,6 +353,7 @@ mod tests {
         App::with(
             crate::items::Tree::build(merged, warnings),
             crate::history::History::in_memory(),
+            Box::new(crate::system::fake::Fake::working()),
         )
     }
 
@@ -418,5 +433,25 @@ mod tests {
         assert!(text.contains("37") && !text.contains("38"));
         assert!(text.contains(" A  run again"));
         assert!(!text.contains("type to search"));
+    }
+
+    #[test]
+    fn renders_settings_values_and_status() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut app = shipped_app();
+        app.refresh_values();
+        // Home: Chromium, Files, Games, Power, Settings, Terminal.
+        for _ in 0..4 {
+            app.on_key(KeyEvent::from(KeyCode::Down));
+        }
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        let text = render(&app);
+        println!("{text}");
+        assert!(text.starts_with(" wifi Home   balanced"));
+        assert!(text.contains(" Home / Settings "));
+        let line = |label: &str| text.lines().find(|l| l.contains(label)).unwrap().to_string();
+        assert!(line("Volume").ends_with("[━━━━──────]  40% │"), "{}", line("Volume"));
+        assert!(line("Brightness").ends_with("[━━━━━━━━──]  80% │"));
+        assert!(line("Power profile").ends_with("< balanced > │"));
     }
 }

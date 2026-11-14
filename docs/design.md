@@ -186,9 +186,18 @@ vertical menu uses the 640x480 screen better.
 
 | Field | Source | Updates |
 |---|---|---|
-| Connection | NetworkManager over D-Bus (`zbus`) | on D-Bus signals, no polling |
-| Power profile | launcher state / `scaling_governor` | only when changed |
+| Connection | `nmcli -t -f TYPE,STATE,CONNECTION device` | each minute, on return from an app, on entering a folder |
+| Power profile | cpufreq sysfs, matched to a profile | as Connection, and when changed |
 | Date and time | system clock | timer aligned to the minute |
+
+Connection reads `wired` when a cable has link (it carries the traffic
+when both are up), else `wifi <name>`, else `offline`; `net ?` when nmcli
+fails. A state that matches no profile reads `custom`.
+
+The minute tick already wakes the launcher, so one `nmcli` call there adds
+no wakeups. A network change shows within a minute, or at the next key.
+D-Bus signals would be immediate but cannot wake the blocking input wait
+either, and cost a large dependency.
 
 No battery field. The PocketTerm35 has its own battery light.
 
@@ -231,8 +240,35 @@ hint bar names what each button does for the selected item. Each folder
 remembers its cursor position. Coming back from a folder seen for the first
 time selects that folder. The menu title is a breadcrumb: `Home / Settings`.
 
-**Confirmation.** Reboot and Shut down ask "Press A again", and cancel after
-3 s.
+**Settings rows.** `value` and `choice` items show their state on the
+right, also in search results:
+
+```
+  Brightness                                   [━━━━━━━━──]  80%
+  Power profile                                     < balanced >
+  Volume                                       [━━━━──────]  40%
+```
+
+- Volume: `wpctl` on `@DEFAULT_AUDIO_SINK@`, steps of 5%, capped at 100%.
+  Shows `muted` when muted.
+- Brightness: the serial protocol (`src/backlight.rs`, ported from
+  pt35-desktop), steps of 10%, the firmware's 5% floor. If the keyboard
+  does not answer once (stock firmware), it is not asked again until the
+  launcher gets the screen back, so a key press never waits 400 ms. Shows
+  `n/a`.
+- Values are read after the first frame (the serial query must not delay
+  it), on return from an app, and on entering a folder.
+
+**Confirmation.** Reboot and Shut down ask "Press A again to reboot". Any
+other key cancels; so do 3 s, after which the hint clears by itself.
+
+**Power actions.** Reboot and Shut down run `systemctl reboot` and
+`systemctl poweroff`: logind allows the active local session without a
+password. Screen off blanks the console (`TIOCLINUX`, `TIOCL_BLANKSCREEN`),
+which on KMS should power the panel down; the next key unblanks it and does
+nothing else, so waking never launches or moves anything. About opens the
+script screen with the version, board model, kernel, host name, address
+and uptime.
 
 **Sorting.** Each folder shows pinned items first (`pin = true`), then
 everything else alphabetically. Home also has a **Recent** group on top: the
@@ -247,17 +283,30 @@ learned by position. Last-used times live in
 ### Power profile
 
 Three profiles, no others: **performance**, **balanced**, **battery saving**.
-The launcher writes sysfs directly (through a small root helper or a polkit
-rule). No `power-profiles-daemon`.
+Left and Right step through them in that order. No
+`power-profiles-daemon`.
 
 | Profile | Governor | Max frequency |
 |---|---|---|
 | performance | `performance` | hardware max |
-| balanced | `schedutil` | hardware max |
-| battery saving | `schedutil` | capped (value to measure) |
+| balanced | `schedutil` (`ondemand` if absent) | hardware max |
+| battery saving | `schedutil` (`ondemand` if absent) | 60% of max, rounded down to an offered frequency |
 
-The mapping is a starting point, to verify on the device. The chosen profile
-persists across reboots.
+Every `policy*` under `/sys/devices/system/cpu/cpufreq` gets the same
+settings. The current profile is read back from sysfs, not remembered, so
+a change made elsewhere shows as `custom`.
+
+**Root.** Writing cpufreq needs root. The launcher runs itself as
+`sudo -n /usr/bin/pockettui35 set-power-profile <name>`; that subcommand
+writes sysfs and exits, with no terminal. `assets/sudoers.d/pockettui35`
+allows exactly those three command lines, without a password, to the
+`pockettui35` group. Without the rule, the row says so in the hint bar.
+
+**Persistence.** cpufreq resets on boot. The chosen profile is saved in
+`$XDG_STATE_HOME/pockettui35/power-profile` and applied again at start-up,
+after the first frame.
+
+The mapping and the 60% cap are a starting point, to measure on the device.
 
 ### Search
 
@@ -433,5 +482,10 @@ Left behind: sway, `pt35d`'s modes, placement and events, `pt35-bar`,
    640x480.
 6. How long does cage take to start on a Pi 4B? It sets the floor for every
    GUI launch.
-7. Power profile mapping: confirm the governors and caps above on Pi 4B and
+7. Screen off: does `TIOCL_BLANKSCREEN` power the HDMI panel down, or only
+   draw black? If only black, add a DPMS call or turn the backlight to its
+   5% floor too.
+8. Kernel idle blanking (`consoleblank=`): the key that wakes it also
+   reaches the launcher and acts. Swallow it too?
+9. Power profile mapping: confirm the governors and caps above on Pi 4B and
    Pi 5, and measure the difference.

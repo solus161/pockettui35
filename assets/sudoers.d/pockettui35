@@ -1,0 +1,10 @@
+# Lets members of the pockettui35 group set the CPU power profile without a
+# password. Only these three exact command lines are allowed.
+#
+# Install as /etc/sudoers.d/pockettui35, owner root, mode 0440, and check
+# with `visudo -cf /etc/sudoers.d/pockettui35`. The path must be where the
+# binary is installed: sudo matches it exactly.
+%pockettui35 ALL=(root) NOPASSWD: \
+    /usr/bin/pockettui35 set-power-profile battery_saving, \
+    /usr/bin/pockettui35 set-power-profile balanced, \
+    /usr/bin/pockettui35 set-power-profile performance

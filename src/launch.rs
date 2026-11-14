@@ -4,12 +4,16 @@
 //! Each app runs in its own process group, made the terminal's foreground
 //! group, as a shell runs a job. Ctrl+C and Ctrl+\ then reach the app and
 //! not the launcher. The launcher waits with no CPU use.
+//!
+//! Holding Start asks the launcher to close the app (`signals.rs`): it
+//! sends SIGTERM to the app's group, then SIGKILL after 3 s.
 
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use crossterm::cursor::{MoveTo, Show};
 use crossterm::execute;
@@ -18,15 +22,23 @@ use crossterm::terminal::{
 };
 
 use crate::items::{Action, Item, Kind};
+use crate::{keys, signals};
 
 /// The compositor for `wayland` apps.
 const CAGE: &str = "cage";
 
+/// After SIGTERM from a close request, how long before SIGKILL.
+const KILL_AFTER: Duration = Duration::from_secs(3);
+
 /// Runs an item that takes the screen. Returns a message for the hint bar,
 /// or `None` when the app exited cleanly.
 pub fn run(terminal: &mut ratatui::DefaultTerminal, item: &Item) -> Option<String> {
-    let (kind, exec) = match &item.action {
-        Action::App { kind, exec, .. } => (*kind, exec.as_str()),
+    let (kind, exec, raw_buttons) = match &item.action {
+        Action::App {
+            kind,
+            exec,
+            raw_buttons,
+        } => (*kind, exec.as_str(), *raw_buttons),
         // Only apps give up the screen. Scripts and built-ins run inside the
         // launcher (`script.rs`, `App::run_builtin`).
         Action::Script { .. }
@@ -44,24 +56,52 @@ pub fn run(terminal: &mut ratatui::DefaultTerminal, item: &Item) -> Option<Strin
         .flatten()
         .and_then(|p| redirect_output(&mut cmd, &p).ok().map(|()| p));
 
+    // A game still starts if keyd cannot be switched; it just gets the
+    // usual mapping, and the message says why.
+    let keys_note = if raw_buttons {
+        keys::set(true)
+            .err()
+            .map(|e| format!("raw buttons not set: {e}"))
+    } else {
+        None
+    };
+
     if let Err(e) = suspend() {
         let _ = resume(terminal);
         return Some(format!("Could not release the screen: {e}"));
     }
+    // A Start hold from before the launch is not meant for this app.
+    signals::take_close();
     let result = run_foreground(&mut cmd);
     let resumed = resume(terminal);
+
+    let keys_note = keys_note.or_else(|| {
+        raw_buttons
+            .then(|| keys::set(false).err())
+            .flatten()
+            .map(|e| format!("buttons not reset: {e}"))
+    });
 
     let msg = match result {
         Err(e) if e.kind() == io::ErrorKind::NotFound && kind == Kind::Wayland => {
             Some(format!("{CAGE} is not installed"))
         }
         Err(e) => Some(format!("{}: {e}", item.label)),
-        Ok(status) => describe(&item.label, status, log.is_some()),
+        Ok(Waited { closed: true, .. }) => Some(format!("{} closed", item.label)),
+        Ok(Waited { status, .. }) => describe(&item.label, status, log.is_some()),
     };
     match resumed {
-        Ok(()) => msg,
+        Ok(()) => msg.or(keys_note),
         Err(e) => Some(format!("Could not take the screen back: {e}")),
     }
+}
+
+/// How a foreground app ended.
+#[derive(Debug)]
+struct Waited {
+    status: ExitStatus,
+    /// Ended by a close request (Start held), not on its own.
+    closed: bool,
 }
 
 /// The command line for an app. `exec` runs through `sh -c`, so it may use
@@ -140,7 +180,7 @@ fn resume(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 
 /// Spawns `cmd` in a new process group, gives it the terminal, and waits
 /// for it to exit.
-fn run_foreground(cmd: &mut Command) -> io::Result<ExitStatus> {
+fn run_foreground(cmd: &mut Command) -> io::Result<Waited> {
     cmd.process_group(0);
     let child = cmd.spawn()?;
     let pid = libc::pid_t::try_from(child.id()).map_err(io::Error::other)?;
@@ -169,11 +209,27 @@ fn run_foreground(cmd: &mut Command) -> io::Result<ExitStatus> {
 
 /// Waits for `pid` to exit. If it stops (Ctrl+Z), it is resumed: there is no
 /// job control here, and a stopped app would hang the launcher.
-fn wait(pid: libc::pid_t) -> io::Result<ExitStatus> {
+///
+/// A close request (SIGUSR1, which interrupts `waitpid`) sends SIGTERM to
+/// the app's group; if it is still there `KILL_AFTER` later, SIGKILL.
+fn wait(pid: libc::pid_t) -> io::Result<Waited> {
+    let mut kill_at: Option<Instant> = None;
     loop {
+        if kill_at.is_none() && signals::take_close() {
+            // SAFETY: signals the child's own process group.
+            unsafe { libc::kill(-pid, libc::SIGTERM) };
+            kill_at = Some(Instant::now() + KILL_AFTER);
+        }
+        // Blocking until a close request; after one, polled so SIGKILL can
+        // follow on time.
+        let flags = if kill_at.is_some() {
+            libc::WUNTRACED | libc::WNOHANG
+        } else {
+            libc::WUNTRACED
+        };
         let mut status = 0;
         // SAFETY: waits on our own child; `status` is a valid out-pointer.
-        let r = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
+        let r = unsafe { libc::waitpid(pid, &mut status, flags) };
         if r == -1 {
             let e = io::Error::last_os_error();
             if e.kind() == io::ErrorKind::Interrupted {
@@ -181,12 +237,25 @@ fn wait(pid: libc::pid_t) -> io::Result<ExitStatus> {
             }
             return Err(e);
         }
+        if r == 0 {
+            // Still running after SIGTERM.
+            if kill_at.is_some_and(|t| Instant::now() >= t) {
+                // SAFETY: signals the child's own process group.
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                kill_at = Some(Instant::now() + Duration::from_secs(3600));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
         if libc::WIFSTOPPED(status) {
             // SAFETY: signals the child's own process group.
             unsafe { libc::kill(-pid, libc::SIGCONT) };
             continue;
         }
-        return Ok(ExitStatus::from_raw(status));
+        return Ok(Waited {
+            status: ExitStatus::from_raw(status),
+            closed: kill_at.is_some(),
+        });
     }
 }
 
@@ -216,19 +285,23 @@ mod tests {
 
     #[test]
     fn exit_status_reaches_us() {
-        let status = run_foreground(&mut command(Kind::Tty, "exit 3")).unwrap();
-        assert_eq!(status.code(), Some(3));
+        let _guard = lock();
+        let waited = run_foreground(&mut command(Kind::Tty, "exit 3")).unwrap();
+        assert_eq!(waited.status.code(), Some(3));
+        assert!(!waited.closed);
     }
 
     #[test]
     fn stopped_child_is_resumed() {
+        let _guard = lock();
         // Without the SIGCONT the wait would hang here.
-        let status = run_foreground(&mut command(Kind::Tty, "kill -STOP $$; exit 4")).unwrap();
-        assert_eq!(status.code(), Some(4));
+        let waited = run_foreground(&mut command(Kind::Tty, "kill -STOP $$; exit 4")).unwrap();
+        assert_eq!(waited.status.code(), Some(4));
     }
 
     #[test]
     fn missing_program_is_an_error() {
+        let _guard = lock();
         let mut cmd = Command::new("pt35-no-such-program");
         let err = run_foreground(&mut cmd).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
@@ -252,6 +325,57 @@ mod tests {
         assert_eq!(
             describe("X", killed, false).unwrap(),
             "X was killed by signal 9"
+        );
+    }
+
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        signals::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Sends SIGUSR1 to the calling thread after `after`, as keyd would to
+    /// the launcher.
+    fn close_request_after(after: Duration) {
+        signals::install();
+        // SAFETY: pthread_self has no preconditions.
+        let me = unsafe { libc::pthread_self() };
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            // SAFETY: the target thread is alive: it waits for this signal.
+            unsafe { libc::pthread_kill(me, libc::SIGUSR1) };
+        });
+    }
+
+    #[test]
+    fn close_request_terminates_the_app() {
+        let _guard = lock();
+        signals::take_close();
+        close_request_after(Duration::from_millis(200));
+        let start = Instant::now();
+        let waited = run_foreground(&mut command(Kind::Tty, "sleep 30")).unwrap();
+        assert!(waited.closed);
+        assert_eq!(waited.status.signal(), Some(libc::SIGTERM));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn close_request_kills_an_app_that_ignores_term() {
+        let _guard = lock();
+        signals::take_close();
+        close_request_after(Duration::from_millis(200));
+        let start = Instant::now();
+        let waited = run_foreground(&mut command(
+            Kind::Tty,
+            "trap '' TERM; while :; do sleep 0.1; done",
+        ))
+        .unwrap();
+        assert!(waited.closed);
+        assert_eq!(waited.status.signal(), Some(libc::SIGKILL));
+        let took = start.elapsed();
+        assert!(
+            took >= KILL_AFTER && took < KILL_AFTER + Duration::from_secs(2),
+            "{took:?}"
         );
     }
 }

@@ -1,10 +1,17 @@
-# Lets members of the pockettui35 group set the CPU power profile without a
-# password. Only these three exact command lines are allowed.
+# pockettui35: what the launcher may do as root, without a password.
+# Five exact command lines, nothing else. The session user is in `video`
+# (the installer adds it), as pt35-desktop's rule had it.
 #
 # Install as /etc/sudoers.d/pockettui35, owner root, mode 0440, and check
 # with `visudo -cf /etc/sudoers.d/pockettui35`. The path must be where the
 # binary is installed: sudo matches it exactly.
-%pockettui35 ALL=(root) NOPASSWD: \
+#
+# set-power-profile writes cpufreq sysfs. keys switches keyd's face
+# buttons for games; keyd's socket is as good as root, so the user gets
+# these two lines instead of the socket.
+%video ALL=(root) NOPASSWD: \
     /usr/bin/pockettui35 set-power-profile battery_saving, \
     /usr/bin/pockettui35 set-power-profile balanced, \
-    /usr/bin/pockettui35 set-power-profile performance
+    /usr/bin/pockettui35 set-power-profile performance, \
+    /usr/bin/pockettui35 keys raw, \
+    /usr/bin/pockettui35 keys normal

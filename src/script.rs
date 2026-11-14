@@ -197,6 +197,7 @@ fn spawn(exec: &str) -> io::Result<(libc::pid_t, Receiver<Msg>)> {
     let (tx, rx) = mpsc::channel();
     let out_tx = tx.clone();
     thread::spawn(move || {
+        crate::signals::block_in_this_thread();
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
@@ -210,6 +211,7 @@ fn spawn(exec: &str) -> io::Result<(libc::pid_t, Receiver<Msg>)> {
         }
     });
     thread::spawn(move || {
+        crate::signals::block_in_this_thread();
         let _ = tx.send(Msg::Exited(child.wait()));
     });
     Ok((pid, rx))

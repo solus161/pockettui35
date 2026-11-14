@@ -134,10 +134,25 @@ Default layer:
 | Start | launcher | see Getting out |
 | Select | to decide | |
 
-**Games.** An app profile with `raw_buttons = true` asks for the F13-F22 keys
-unmapped. RetroArch binds them directly. keyd layers can change at run time
-through `keyd bind`, so the launcher switches the layer around the launch and
-switches it back on exit. To verify: RetroArch can bind F16 and above.
+**Games.** An app with `raw_buttons = true` gets the face buttons and
+Select unmapped (F13-F18, F21) for its run; RetroArch binds them directly.
+Start (F22) keeps its hold-to-close in every mode.
+
+- Before the launch the launcher runs `keyd bind 'main.f13 = f13' ...`, and
+  `keyd bind reset` after the app exits.
+- keyd's manual counts access to its socket as root, so the session user
+  does not get it. The launcher runs `sudo -n pockettui35 keys raw|normal`,
+  and the sudoers rule allows those two exact lines. The `keys` subcommand
+  calls keyd and exits.
+- A marker file (`$XDG_STATE_HOME/pockettui35/keys-raw`) exists while the
+  buttons are raw. A launcher that crashed mid-game finds it at start-up and
+  resets keyd.
+- If keyd cannot be switched the game still starts, with the usual map, and
+  the hint bar says why.
+- `keyd bind` applies to the most recently active keyboard. The RP2040 is
+  the only one, and its A press just launched the game.
+
+To verify: RetroArch can bind F16 and above.
 
 **Stock firmware is not supported.** On stock the face buttons send the
 letters `a b x y l r`, the same codes as the QWERTY keys. No remapper can
@@ -149,8 +164,21 @@ does today.
 cage has no key bindings, so the way out has to live outside the app.
 
 - **Quit inside the app** is the normal path: B, Ctrl+Q, `q`.
-- **Start held for one second** runs a keyd `command()` that asks the
-  launcher to close the running app (SIGTERM, then SIGKILL after 3 s).
+- **Start held for one second** runs a keyd `command()`:
+  `f22 = timeout(f22, 1000, command(pkill -USR1 -x pockettui35))`. A tap
+  stays F22, for games. keyd runs the command as root; it only signals the
+  launcher.
+  - An app is running: the launcher is blocked in `waitpid`. SIGUSR1 is
+    installed without `SA_RESTART`, so the wait returns at once, and the
+    launcher sends SIGTERM to the app's process group, then SIGKILL after
+    3 s. The hint bar says "<app> closed".
+  - A script is running: it is stopped, as with B. A second hold kills it.
+  - In the menu it does nothing.
+  - Helper threads block SIGUSR1, so the signal always lands on the main
+    thread, the one waiting.
+  - To verify on the device: keyd's manual words `timeout()` ambiguously
+    (a typo at the key sentence). The intent is
+    `timeout(<tap>, <ms>, <hold>)`.
 - Touch keeps working in `wayland` apps when the keyboard does not. The
   RP2040 can hang and take every button with it. This only helps if the app
   has a close control; the launcher itself has no touch.
@@ -455,8 +483,39 @@ Scaling is per app, as today: `--force-device-scale-factor` for Chromium,
 ## Boot
 
 1. Pi OS Lite, `waveshare-35dpi-5b` overlay in `config.txt`.
-2. greetd (or getty autologin) starts the session on tty1.
-3. tty1 runs `pockettui35` directly, restarted if it exits.
+2. getty logs the session user in on tty1 with no prompt
+   (`getty@tty1.service.d/pockettui35-autologin.conf`). The default target is
+   `multi-user.target`; no display manager. The logind session this creates
+   is what cage uses for DRM and input: no seatd, no greetd.
+3. The login shell reads `/etc/profile.d/pockettui35.sh`, which on tty1, for
+   that user only, runs `exec pockettui35-session`.
+4. `pockettui35-session` runs the launcher:
+   - A crash restarts it after a second. Five crashes in a row, each within
+     30 s of starting, give up to a shell, so a broken install cannot loop
+     for ever.
+   - A clean exit (Ctrl+Q) drops to a login shell with `PT35_NO_LAUNCHER=1`,
+     for maintenance. Leaving that shell ends the session; getty logs in
+     again and the launcher is back.
+5. At start-up the launcher draws its first frame, then puts back the saved
+   power profile and resets keyd if a crash left the buttons raw.
+
+**Installer.** `sudo ./install.sh [--dry-run] [--user NAME] [--no-build]`,
+and `--uninstall`.
+
+- **Packages:** `cage keyd pipewire pipewire-alsa wireplumber`.
+- **Build:** builds as the user, with rustup's cargo.
+- **Installs:** the binary, the session wrapper, the shipped config, the
+  keyd map, the sudoers rule (checked with `visudo` first), the getty
+  drop-in and the profile hook.
+- **Groups:** adds the user to `video` (sudoers rule, DRM), `dialout` (the
+  keyboard's serial console), `input`, `render` and `audio`.
+- **Conflicts:** moves an older keyd config for the same keyboard aside
+  (keyd allows one config per device). Disables greetd, lightdm, gdm3 or
+  sddm if enabled.
+- **Kernel command line:** adds `vt.global_cursor_default=0` to
+  `/boot/firmware/cmdline.txt`, with a backup.
+- **Safety:** refuses to run on anything but a Raspberry Pi without
+  `--force`, since it takes over tty1.
 
 ## What comes over from pt35-desktop
 

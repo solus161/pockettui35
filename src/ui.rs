@@ -449,8 +449,17 @@ mod tests {
         println!("{text}");
         assert!(text.starts_with(" wifi Home   balanced"));
         assert!(text.contains(" Home / Settings "));
-        let line = |label: &str| text.lines().find(|l| l.contains(label)).unwrap().to_string();
-        assert!(line("Volume").ends_with("[━━━━──────]  40% │"), "{}", line("Volume"));
+        let line = |label: &str| {
+            text.lines()
+                .find(|l| l.contains(label))
+                .unwrap()
+                .to_string()
+        };
+        assert!(
+            line("Volume").ends_with("[━━━━──────]  40% │"),
+            "{}",
+            line("Volume")
+        );
         assert!(line("Brightness").ends_with("[━━━━━━━━──]  80% │"));
         assert!(line("Power profile").ends_with("< balanced > │"));
     }

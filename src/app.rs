@@ -295,7 +295,8 @@ impl App {
         if key.code != KeyCode::Enter {
             self.confirm = None;
         }
-        // Dev escape hatch. On the device the launcher never quits.
+        // Quits. On the device, pockettui35-session then drops to a shell
+        // for maintenance; leaving it brings the launcher back.
         if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
             return;
@@ -362,6 +363,19 @@ impl App {
             KeyCode::Esc if run.running() => run.stop(),
             KeyCode::Esc => self.script = None,
             _ => {}
+        }
+    }
+
+    /// Start held while the launcher has the screen: stops a running
+    /// script (TERM, then KILL on a second hold), as B does. Returns true if
+    /// the screen changed.
+    pub fn close_request(&mut self) -> bool {
+        match &mut self.script {
+            Some(run) if run.running() => {
+                run.stop();
+                true
+            }
+            _ => false,
         }
     }
 

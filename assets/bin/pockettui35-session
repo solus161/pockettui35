@@ -1,0 +1,36 @@
+#!/bin/sh
+# pockettui35-session: runs the launcher on tty1.
+#
+# Started by /etc/profile.d/pockettui35.sh after getty's autologin.
+#
+# - A crash restarts the launcher after a second. Five crashes in a row,
+#   each within 30 s of starting, give up to a shell, so a broken install
+#   does not loop for ever.
+# - A clean exit (Ctrl+Q) drops to a login shell, for maintenance. Leaving
+#   that shell ends the session; getty logs in again and the launcher is
+#   back.
+set -u
+
+quick_fails=0
+while :; do
+  started=$(date +%s)
+  pockettui35
+  status=$?
+  [ "$status" -eq 0 ] && break
+
+  if [ $(( $(date +%s) - started )) -lt 30 ]; then
+    quick_fails=$((quick_fails + 1))
+  else
+    quick_fails=1
+  fi
+  if [ "$quick_fails" -ge 5 ]; then
+    printf '\npockettui35 failed %d times in a row (last status %d).\n' \
+      "$quick_fails" "$status"
+    printf 'Dropping to a shell. Exit it to try again.\n\n'
+    break
+  fi
+  sleep 1
+done
+
+# The profile hook checks this, so the shell does not start the launcher.
+PT35_NO_LAUNCHER=1 exec "${SHELL:-/bin/sh}" -l

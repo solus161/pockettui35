@@ -8,9 +8,11 @@ mod config;
 mod cpufreq;
 mod history;
 mod items;
+mod keys;
 mod launch;
 mod script;
 mod search;
+mod signals;
 mod system;
 mod ui;
 
@@ -25,10 +27,16 @@ use app::App;
 use system::Host;
 
 fn main() -> ExitCode {
-    // The root side of the power profile, run through sudo. No terminal.
+    // First: SIGUSR1 (Start held) would otherwise end the process.
+    signals::install();
+
+    // The root sides of the power profile and the button layers, run
+    // through sudo. No terminal.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some(cpufreq::SUBCOMMAND) {
-        return cpufreq::subcommand(&args[1..]);
+    match args.first().map(String::as_str) {
+        Some(cpufreq::SUBCOMMAND) => return cpufreq::subcommand(&args[1..]),
+        Some(keys::SUBCOMMAND) => return keys::subcommand(&args[1..]),
+        _ => {}
     }
 
     // Enters raw mode and the alternate screen, and installs a panic hook
@@ -53,6 +61,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     if let Err(e) = system::restore_power_profile() {
         app.message = Some(format!("Power profile not restored: {e}"));
     }
+    // Raw buttons left on by a launcher that crashed during a game.
+    if let Err(e) = keys::reset_if_left_raw() {
+        app.message = Some(format!("Buttons not reset: {e}"));
+    }
     app.refresh_values();
     terminal.draw(|f| ui::draw(f, &app))?;
     let mut drawn_minute = minute_now();
@@ -69,15 +81,21 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             timeout = timeout.min(deadline.saturating_duration_since(Instant::now()));
         }
         let mut redraw = false;
-        if event::poll(timeout)? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+        // SIGUSR1 (Start held) may interrupt the wait: that is no error.
+        if interrupted_ok(event::poll(timeout))?.unwrap_or(false) {
+            match interrupted_ok(event::read())? {
+                Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                     app.on_key(key);
                     redraw = true;
                 }
-                Event::Resize(_, _) => redraw = true,
+                Some(Event::Resize(_, _)) => redraw = true,
                 _ => {}
             }
+        }
+        // Start held with no app running: stops a running script. In the
+        // menu it does nothing.
+        if signals::take_close() {
+            redraw |= app.close_request();
         }
         if let Some(item) = app.pending.take().and_then(|id| app.tree.get(&id).cloned()) {
             app.message = launch::run(terminal, &item);
@@ -97,6 +115,15 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Turns `EINTR` into "nothing happened".
+fn interrupted_ok<T>(r: io::Result<T>) -> io::Result<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// How often a running script's output is taken in.

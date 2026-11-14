@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config;
 use crate::history::History;
 use crate::items::{Action, HOME, Item, Tree};
+use crate::script::ScriptRun;
 use crate::search::{Hit, Search};
 
 /// Most items shown in the Recent group.
@@ -61,6 +62,8 @@ pub struct App {
     search: Search,
     /// Selection when the search started, restored when it ends.
     before_search: Option<RowKey>,
+    /// The script output screen, shown over the menu while `Some`.
+    pub script: Option<ScriptRun>,
 }
 
 impl App {
@@ -82,6 +85,7 @@ impl App {
             hits: Vec::new(),
             search: Search::new(),
             before_search: None,
+            script: None,
         };
         app.fix_selection();
         app
@@ -170,11 +174,16 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         self.message = None;
+        // Dev escape hatch. On the device the launcher never quits.
+        if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.should_quit = true;
+            return;
+        }
+        if self.script.is_some() {
+            self.script_key(key);
+            return;
+        }
         match key.code {
-            // Dev escape hatch. On the device the launcher never quits.
-            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
             KeyCode::Up => self.move_by(-1),
             KeyCode::Down => self.move_by(1),
             KeyCode::Home => self.move_by(isize::MIN),
@@ -200,6 +209,46 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Keys on the script output screen. Up/Down and PageUp/PageDown
+    /// scroll, Home/End jump. A runs it again once it has ended. B stops a
+    /// running script (TERM, then KILL on a second press), or closes the
+    /// screen.
+    fn script_key(&mut self, key: KeyEvent) {
+        let Some(run) = &mut self.script else { return };
+        let page = usize::from(run.view_height.get().max(2) - 1);
+        let max = run
+            .output
+            .len()
+            .saturating_sub(usize::from(run.view_height.get()));
+        let scroll = |run: &mut ScriptRun, up: isize| {
+            run.from_bottom = run.from_bottom.saturating_add_signed(up).min(max);
+        };
+        match key.code {
+            KeyCode::Up => scroll(run, 1),
+            KeyCode::Down => scroll(run, -1),
+            KeyCode::PageUp => scroll(run, page.cast_signed()),
+            KeyCode::PageDown => scroll(run, -page.cast_signed()),
+            KeyCode::Home => run.from_bottom = max,
+            KeyCode::End => run.from_bottom = 0,
+            KeyCode::Enter if !run.running() => {
+                self.history.record(&run.id);
+                run.restart();
+            }
+            KeyCode::Esc if run.running() => run.stop(),
+            KeyCode::Esc => self.script = None,
+            _ => {}
+        }
+    }
+
+    /// Takes in new script output. Returns true if the screen changed.
+    pub fn pump_script(&mut self) -> bool {
+        self.script.as_mut().is_some_and(ScriptRun::pump)
+    }
+
+    pub fn script_running(&self) -> bool {
+        self.script.as_ref().is_some_and(ScriptRun::running)
     }
 
     fn type_char(&mut self, c: char) {
@@ -275,9 +324,14 @@ impl App {
             Action::Folder => self.enter(&id),
             // Adjusted with Left/Right, not A (step 7).
             Action::Value(_) | Action::Choice(_) => {}
-            Action::App { .. } | Action::Script { .. } => {
+            Action::App { .. } => {
                 self.history.record(&id);
                 self.pending = Some(id);
+            }
+            Action::Script { exec } => {
+                self.history.record(&id);
+                let label = self.tree.get(&id).map_or("", |i| i.label.as_str());
+                self.script = Some(ScriptRun::start(&id, label, &exec));
             }
             Action::Builtin { .. } => self.pending = Some(id),
         }
@@ -618,5 +672,105 @@ mod tests {
         type_str(&mut a, "sh d");
         assert_eq!(a.query, "sh d");
         assert_eq!(sel(&a), "shutdown");
+    }
+
+    fn app_with_script(exec: &str) -> App {
+        let user = format!(
+            "[item.job]\nlabel = \"Job\"\ntype = \"script\"\nexec = {exec:?}\npin = true\n"
+        );
+        let (merged, warnings) = merge_layers(&[
+            Layer {
+                name: "shipped".into(),
+                text: SHIPPED.into(),
+            },
+            Layer {
+                name: "user".into(),
+                text: user,
+            },
+        ]);
+        let tree = Tree::build(merged, warnings);
+        assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+        App::with(tree, History::in_memory())
+    }
+
+    fn wait_script(a: &mut App) {
+        let start = std::time::Instant::now();
+        while a.script_running() {
+            a.pump_script();
+            assert!(start.elapsed().as_secs() < 5, "script hung");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        a.pump_script();
+    }
+
+    #[test]
+    fn script_opens_its_screen_and_b_closes_it() {
+        let mut a = app_with_script("echo hi");
+        assert_eq!(sel(&a), "job");
+        press(&mut a, KeyCode::Enter);
+        assert!(a.script.is_some());
+        assert!(a.pending.is_none(), "scripts do not give up the screen");
+        wait_script(&mut a);
+        assert_eq!(a.script.as_ref().unwrap().output.lines(), ["hi"]);
+
+        // Typing does not leak into search behind the screen.
+        press(&mut a, KeyCode::Char('x'));
+        assert!(!a.searching());
+
+        press(&mut a, KeyCode::Esc);
+        assert!(a.script.is_none());
+        assert_eq!(sel(&a), "job");
+        // Recorded as used.
+        assert!(a.rows().contains(&Row::Header("Recent")));
+    }
+
+    #[test]
+    fn b_stops_a_running_script_before_closing() {
+        let mut a = app_with_script("sleep 30");
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Esc);
+        assert!(a.script.is_some(), "first B stops, does not close");
+        wait_script(&mut a);
+        assert_eq!(a.script.as_ref().unwrap().summary(), "stopped by signal 15");
+        press(&mut a, KeyCode::Esc);
+        assert!(a.script.is_none());
+    }
+
+    #[test]
+    fn a_runs_again_only_after_the_end() {
+        let mut a = app_with_script("echo run; sleep 0.3");
+        press(&mut a, KeyCode::Enter);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        a.pump_script();
+        // A while running does nothing: the output is kept.
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.script.as_ref().unwrap().output.lines(), ["run"]);
+        wait_script(&mut a);
+
+        // A after the end clears the screen and runs it again.
+        press(&mut a, KeyCode::Enter);
+        assert!(a.script_running());
+        assert_eq!(a.script.as_ref().unwrap().output.len(), 0);
+        wait_script(&mut a);
+        assert_eq!(a.script.as_ref().unwrap().output.lines(), ["run"]);
+    }
+
+    #[test]
+    fn scrolling_is_clamped() {
+        let mut a = app_with_script("seq 1 100");
+        press(&mut a, KeyCode::Enter);
+        wait_script(&mut a);
+        a.script.as_ref().unwrap().view_height.set(20);
+        press(&mut a, KeyCode::Home);
+        assert_eq!(a.script.as_ref().unwrap().from_bottom, 80);
+        press(&mut a, KeyCode::Up);
+        assert_eq!(a.script.as_ref().unwrap().from_bottom, 80);
+        press(&mut a, KeyCode::PageDown);
+        assert_eq!(a.script.as_ref().unwrap().from_bottom, 61);
+        press(&mut a, KeyCode::End);
+        assert_eq!(a.script.as_ref().unwrap().from_bottom, 0);
+        press(&mut a, KeyCode::Down);
+        assert_eq!(a.script.as_ref().unwrap().from_bottom, 0);
     }
 }

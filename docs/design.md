@@ -286,10 +286,31 @@ persists across reboots.
 
 ### Script output
 
-A `script` item runs with stdout and stderr captured into a launcher screen.
-Output streams live. ANSI colours are converted (`ansi-to-tui`) or stripped.
-The screen ends with the exit status. B closes it, A runs it again. Scripts
-that need input use `type = "app"`, `kind = "tty"` instead.
+A `script` item keeps the screen: its output streams into a launcher
+screen, framed and titled with the item's label.
+
+- stdout and stderr share one pipe, so they stay in order. stdin is
+  `/dev/null`. `TERM=dumb` asks tools for plain output; escape sequences
+  that still arrive are stripped (no colour), tabs are expanded, and `\r`
+  rewrites the current line, so progress counters end up as one line.
+- Long lines are cut at the edge, not wrapped: one output line is one row,
+  and scrolling stays exact. The last 10,000 lines are kept.
+- New output follows the end. Up/Down and PageUp/PageDown scroll back,
+  Home/End jump; the frame shows `v N more` while scrolled up.
+- The frame's bottom edge shows the state: `running`, `stopping`, `done`,
+  `failed, exit N`, `stopped by signal N`.
+- B on a running script sends SIGTERM to its process group; a second B
+  sends SIGKILL. B on a finished script closes the screen. A on a finished
+  script clears the screen and runs it again.
+- The script runs in its own process group, so stopping it reaches its
+  children. One thread reads the pipe and another waits for the exit, so
+  a background child holding the pipe open cannot hide the exit status.
+- While a script runs, the main loop also wakes every 50 ms to take in
+  output, and redraws only when something changed. Once it ends, the loop
+  goes back to waking only for input and the clock.
+- Quitting the launcher sends SIGTERM to a running script.
+
+Scripts that need input use `type = "app"`, `kind = "tty"` instead.
 
 ### Drawing
 

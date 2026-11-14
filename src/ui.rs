@@ -10,8 +10,21 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::app::{App, Row};
 use crate::items::{Action, HOME};
+use crate::script::{ScriptRun, Status};
 
 pub fn draw(f: &mut Frame, app: &App) {
+    if let Some(run) = &app.script {
+        let [status, body, hints] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .areas(f.area());
+        draw_status(f, status);
+        draw_script(f, body, run);
+        draw_script_hints(f, hints, run);
+        return;
+    }
     let [status, search, menu, hints] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(3),
@@ -68,6 +81,59 @@ fn draw_search(f: &mut Frame, area: Rect, app: &App) {
             .right_aligned();
         f.render_widget(count, inner);
     }
+}
+
+/// The script output screen. Lines longer than the width are cut, not
+/// wrapped, so one output line is one screen row and scrolling stays exact.
+fn draw_script(f: &mut Frame, area: Rect, run: &ScriptRun) {
+    let dim = Style::new().fg(Color::DarkGray);
+    let summary_style = if run.running() {
+        Style::new().fg(Color::Yellow)
+    } else if run.succeeded() {
+        Style::new().fg(Color::Green)
+    } else {
+        Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
+    };
+    let mut block = Block::new()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", run.label))
+        .title_bottom(Line::styled(format!(" {} ", run.summary()), summary_style).right_aligned());
+
+    let lines = run.output.lines();
+    let inner = block.inner(area);
+    let height = usize::from(inner.height);
+    run.view_height.set(inner.height);
+    let from_bottom = run.from_bottom.min(lines.len().saturating_sub(height));
+    let end = lines.len() - from_bottom;
+    let start = end.saturating_sub(height);
+    if from_bottom > 0 {
+        block = block.title_bottom(Line::styled(format!(" v {from_bottom} more "), dim));
+    }
+
+    let text: Vec<Line> = lines[start..end]
+        .iter()
+        .map(|l| Line::raw(l.as_str()))
+        .collect();
+    f.render_widget(Paragraph::new(text).block(block), area);
+}
+
+fn draw_script_hints(f: &mut Frame, area: Rect, run: &ScriptRun) {
+    let key = Style::new().fg(Color::Black).bg(Color::Cyan);
+    let mut hints = Vec::new();
+    match run.status {
+        Status::Running { term_sent, .. } => {
+            let b = if term_sent { " kill  " } else { " stop  " };
+            hints.extend([Span::styled(" B ", key), Span::raw(b)]);
+        }
+        _ => hints.extend([
+            Span::styled(" A ", key),
+            Span::raw(" run again  "),
+            Span::styled(" B ", key),
+            Span::raw(" close  "),
+        ]),
+    }
+    hints.extend([Span::styled(" ^/v ", key), Span::raw(" scroll")]);
+    f.render_widget(Paragraph::new(Line::from(hints)), area);
 }
 
 /// A label with the characters at `indices` highlighted.
@@ -328,5 +394,29 @@ mod tests {
             ]
         );
         assert_eq!(label_spans("Files", &[]).len(), 1);
+    }
+
+    #[test]
+    fn renders_script_screen() {
+        let mut app = shipped_app();
+        let mut run = ScriptRun::start("t", "Sync notes", "seq 1 40; exit 2");
+        let start = std::time::Instant::now();
+        while run.running() {
+            run.pump();
+            assert!(start.elapsed().as_secs() < 5);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        run.pump();
+        run.from_bottom = 3;
+        app.script = Some(run);
+        let text = render(&app);
+        println!("{text}");
+        assert!(text.contains(" Sync notes "));
+        assert!(text.contains(" failed, exit 2 "));
+        assert!(text.contains(" v 3 more "));
+        assert!(text.contains("37") && !text.contains("38"));
+        assert!(text.contains(" A  run again"));
+        assert!(!text.contains("type to search"));
     }
 }

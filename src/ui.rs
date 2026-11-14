@@ -112,6 +112,11 @@ fn breadcrumb(app: &App) -> String {
 }
 
 fn draw_hints(f: &mut Frame, area: Rect, app: &App) {
+    if let Some(msg) = &app.message {
+        let line = Line::styled(format!(" {msg}"), Style::new().fg(Color::Yellow));
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
     let key = Style::new().fg(Color::Black).bg(Color::Cyan);
     let mut hints = Vec::new();
     // What A does depends on the selected item.

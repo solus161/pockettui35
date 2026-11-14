@@ -54,6 +54,26 @@ Every app has one of three launch kinds.
 
 The launcher waits for the app to exit and redraws.
 
+How a launch runs:
+
+- `exec` goes through `sh -c`, so it can use quoting, `~` and `$VARS`.
+  `tty` and `kms` run it as is; `wayland` runs `cage -- sh -c <exec>`.
+- The launcher leaves raw mode and the alternate screen, and clears the
+  console, so the app starts on a clean screen.
+- The app runs in its own process group, made the terminal's foreground
+  group, as a shell runs a job. Ctrl+C and Ctrl+\\ reach the app, never the
+  launcher. When it exits the launcher takes the terminal back.
+- An app stopped with Ctrl+Z is resumed at once: there is no job control,
+  and a stopped app would hang the launcher.
+- The launcher blocks in `waitpid` while the app runs: no CPU use.
+- `wayland` output (cage and the client) goes to
+  `$XDG_STATE_HOME/pockettui35/launch.log`, overwritten per launch, so it
+  stays off the console and a failed launch can be looked into.
+- A non-zero exit, a signal, or a missing `cage` shows as a one-line message
+  in the hint bar until the next key.
+- The config is re-read on return, so items edited from inside an app show
+  up at once.
+
 ## Where the launcher lives
 
 **Decided: on the Linux console.** tty1 autologs in and runs the launcher

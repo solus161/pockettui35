@@ -179,7 +179,7 @@ fn type_name(ty: ItemType) -> &'static str {
 }
 
 /// The menu: items by id, and each folder's children in display order.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Tree {
     items: HashMap<String, Item>,
     children: HashMap<String, Vec<String>>,

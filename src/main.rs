@@ -6,6 +6,7 @@ mod app;
 mod config;
 mod history;
 mod items;
+mod launch;
 mod ui;
 
 use std::io;
@@ -38,6 +39,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 Event::Resize(_, _) => {}
                 _ => continue,
             }
+        }
+        if let Some(item) = app.pending.take().and_then(|id| app.tree.get(&id).cloned()) {
+            app.message = launch::run(terminal, &item);
+            // The user may have edited the config from inside the app.
+            app.reload();
         }
         terminal.draw(|f| ui::draw(f, &app))?;
     }

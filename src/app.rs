@@ -48,8 +48,11 @@ pub struct App {
     selected: Option<RowKey>,
     /// Cursor per folder, restored when the folder is shown again.
     cursors: HashMap<String, RowKey>,
-    /// Item to run. Taken by the launch code (step 4).
+    /// Item to run, taken by the main loop.
     pub pending: Option<String>,
+    /// One-shot note for the hint bar, e.g. why a launch failed. Cleared by
+    /// the next key.
+    pub message: Option<String>,
 }
 
 impl App {
@@ -66,9 +69,26 @@ impl App {
             selected: None,
             cursors: HashMap::new(),
             pending: None,
+            message: None,
         };
         app.fix_selection();
         app
+    }
+
+    /// Re-reads the config, keeping the folder and cursor where they still
+    /// exist. Called each time the launcher gets the screen back.
+    pub fn reload(&mut self) {
+        self.set_tree(config::load());
+    }
+
+    fn set_tree(&mut self, tree: Tree) {
+        self.tree = tree;
+        if self.folder != HOME && self.tree.get(&self.folder).is_none_or(|i| !i.is_folder()) {
+            self.folder = HOME.to_string();
+            self.selected = self.cursors.get(HOME).cloned();
+        }
+        self.cursors.retain(|_, k| self.tree.get(&k.id).is_some());
+        self.fix_selection();
     }
 
     /// The rows of the current folder. Home starts with the Recent group:
@@ -114,6 +134,7 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        self.message = None;
         match key.code {
             // Dev escape hatch. On the device the launcher never quits.
             KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -367,5 +388,34 @@ mod tests {
             .filter(|k| k.recent)
             .count();
         assert_eq!(n, RECENT_MAX);
+    }
+
+    #[test]
+    fn reload_keeps_position_or_falls_back_home() {
+        let mut a = app();
+        go_to(&mut a, "settings");
+        press(&mut a, KeyCode::Enter);
+        go_to(&mut a, "wifi");
+
+        // Same config: still on Wi-Fi in Settings.
+        let same = a.tree.clone();
+        a.set_tree(same);
+        assert_eq!(a.folder, "settings");
+        assert_eq!(sel(&a), "wifi");
+
+        // Settings hidden by the user: back to Home, on its first row.
+        let (merged, warnings) = merge_layers(&[
+            Layer {
+                name: "shipped".into(),
+                text: SHIPPED.into(),
+            },
+            Layer {
+                name: "user".into(),
+                text: "[item.settings]\nhidden = true\n".into(),
+            },
+        ]);
+        a.set_tree(Tree::build(merged, warnings));
+        assert_eq!(a.folder, HOME);
+        assert_eq!(sel(&a), "browser");
     }
 }

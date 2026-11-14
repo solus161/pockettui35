@@ -7,6 +7,7 @@ mod config;
 mod history;
 mod items;
 mod launch;
+mod search;
 mod ui;
 
 use std::io;

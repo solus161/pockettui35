@@ -21,7 +21,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     .areas(f.area());
 
     draw_status(f, status);
-    draw_search(f, search);
+    draw_search(f, search, app);
     draw_menu(f, menu, app);
     draw_hints(f, hints, app);
 }
@@ -38,19 +38,80 @@ fn draw_status(f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(clock).style(style).right_aligned(), right);
 }
 
-fn draw_search(f: &mut Frame, area: Rect) {
+fn draw_search(f: &mut Frame, area: Rect, app: &App) {
+    let dim = Style::new().fg(Color::DarkGray);
     let block = Block::new().borders(Borders::ALL);
-    let text = Line::from(vec![
-        Span::styled("/ ", Style::new().fg(Color::DarkGray)),
-        Span::styled("type to search", Style::new().fg(Color::DarkGray)),
-    ]);
+    let text = if app.searching() {
+        Line::from(vec![
+            Span::styled("/ ", dim),
+            Span::styled(
+                app.query.as_str(),
+                Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            // A drawn cursor: the real one stays hidden so its blink timer
+            // does not wake the CPU.
+            Span::styled("_", Style::new().fg(Color::Yellow)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("/ ", dim),
+            Span::styled("type to search", dim),
+        ])
+    };
+    let inner = block.inner(area);
     f.render_widget(Paragraph::new(text).block(block), area);
+    if app.searching() {
+        let n = app.hits.len();
+        let s = if n == 1 { "" } else { "s" };
+        let count = Paragraph::new(format!("{n} result{s} "))
+            .style(dim)
+            .right_aligned();
+        f.render_widget(count, inner);
+    }
+}
+
+/// A label with the characters at `indices` highlighted.
+fn label_spans<'a>(label: &'a str, indices: &[u32]) -> Vec<Span<'a>> {
+    if indices.is_empty() {
+        return vec![Span::raw(label)];
+    }
+    let hl = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let mut spans = Vec::new();
+    let mut run_start = 0;
+    let mut run_hl = false;
+    for (i, (byte, _)) in label.char_indices().enumerate() {
+        let is_hl = u32::try_from(i).is_ok_and(|i| indices.binary_search(&i).is_ok());
+        if is_hl != run_hl {
+            if byte > run_start {
+                let text = &label[run_start..byte];
+                spans.push(if run_hl {
+                    Span::styled(text, hl)
+                } else {
+                    Span::raw(text)
+                });
+            }
+            run_start = byte;
+            run_hl = is_hl;
+        }
+    }
+    let text = &label[run_start..];
+    spans.push(if run_hl {
+        Span::styled(text, hl)
+    } else {
+        Span::raw(text)
+    });
+    spans
 }
 
 fn draw_menu(f: &mut Frame, area: Rect, app: &App) {
+    let title = if app.searching() {
+        " Search ".to_string()
+    } else {
+        format!(" {} ", breadcrumb(app))
+    };
     let block = Block::new()
         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-        .title(format!(" {} ", breadcrumb(app)));
+        .title(title);
 
     let dim = Style::new().fg(Color::DarkGray);
     // Inner width minus the 2-column highlight symbol.
@@ -65,11 +126,11 @@ fn draw_menu(f: &mut Frame, area: Rect, app: &App) {
                 let Some(item) = app.tree.get(&key.id) else {
                     return ListItem::new("");
                 };
-                // Right column: `>` for folders; in Recent, the folder an
-                // item lives in when that is not Home.
+                // Right column: `>` for folders; in Recent and in search
+                // results, the folder an item lives in when that is not Home.
                 let right = if item.is_folder() {
                     Some(Span::raw("> "))
-                } else if key.recent {
+                } else if key.recent || app.searching() {
                     app.tree
                         .parent(&item.id)
                         .filter(|p| *p != HOME)
@@ -78,7 +139,12 @@ fn draw_menu(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     None
                 };
-                let mut spans = vec![Span::raw(item.label.as_str())];
+                let indices = app
+                    .hits
+                    .iter()
+                    .find(|h| h.id == item.id)
+                    .map_or(&[][..], |h| h.indices.as_slice());
+                let mut spans = label_spans(&item.label, indices);
                 if let Some(right) = right {
                     let used = item.label.chars().count() + right.content.chars().count();
                     spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
@@ -135,10 +201,14 @@ fn draw_hints(f: &mut Frame, area: Rect, app: &App) {
     {
         hints.extend([Span::styled(" </> ", key), Span::raw(" adjust  ")]);
     }
-    if app.folder != HOME {
-        hints.extend([Span::styled(" B ", key), Span::raw(" back  ")]);
+    if app.searching() {
+        hints.extend([Span::styled(" B ", key), Span::raw(" clear  ")]);
+    } else {
+        if app.folder != HOME {
+            hints.extend([Span::styled(" B ", key), Span::raw(" back  ")]);
+        }
+        hints.push(Span::raw(" type to search"));
     }
-    hints.push(Span::raw(" type to search"));
     // Config problems never stop the launcher, but must not go unnoticed.
     // A screen to read them comes later.
     let n = app.tree.warnings.len();
@@ -193,5 +263,70 @@ mod tests {
         assert!(text.contains("Home"));
         assert!(text.contains("Settings") && text.contains("> │"));
         assert!(!text.contains("config warning"));
+    }
+
+    fn shipped_app() -> App {
+        let (merged, warnings) = crate::config::merge_layers(&[crate::config::Layer {
+            name: "shipped".into(),
+            text: crate::config::SHIPPED.into(),
+        }]);
+        App::with(
+            crate::items::Tree::build(merged, warnings),
+            crate::history::History::in_memory(),
+        )
+    }
+
+    fn render(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
+    }
+
+    #[test]
+    fn renders_search() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut app = shipped_app();
+        for c in "rpi".chars() {
+            app.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let text = render(&app);
+        println!("{text}");
+        assert!(text.contains("/ rpi_"));
+        assert!(text.contains(" Search "));
+        assert!(text.contains("result"));
+        assert!(text.contains(" B  clear"));
+        assert!(!text.contains("type to search"));
+        let hit = text
+            .lines()
+            .find(|l| l.contains("Raspberry Pi config"))
+            .unwrap();
+        assert!(hit.trim_end().ends_with("Settings │"), "{hit}");
+    }
+
+    #[test]
+    fn label_spans_split_into_runs() {
+        let spans = label_spans("Raspberry Pi config", &[0, 10, 11]);
+        let parts: Vec<(&str, bool)> = spans
+            .iter()
+            .map(|s| (s.content.as_ref(), s.style.fg == Some(Color::Cyan)))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("R", true),
+                ("aspberry ", false),
+                ("Pi", true),
+                (" config", false)
+            ]
+        );
+        assert_eq!(label_spans("Files", &[]).len(), 1);
     }
 }

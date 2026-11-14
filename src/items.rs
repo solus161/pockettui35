@@ -199,6 +199,11 @@ impl Tree {
         self.parents.get(id).map(String::as_str)
     }
 
+    /// Every item in the tree, in no particular order.
+    pub fn all(&self) -> impl Iterator<Item = &Item> {
+        self.items.values()
+    }
+
     /// Children of a folder, pinned first, then alphabetical by label.
     pub fn children(&self, folder: &str) -> &[String] {
         self.children.get(folder).map_or(&[], Vec::as_slice)

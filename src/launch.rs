@@ -12,10 +12,10 @@ use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 
 use crossterm::cursor::{MoveTo, Show};
+use crossterm::execute;
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::execute;
 
 use crate::items::{Action, Item, Kind};
 

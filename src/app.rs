@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config;
 use crate::history::History;
 use crate::items::{Action, HOME, Item, Tree};
+use crate::search::{Hit, Search};
 
 /// Most items shown in the Recent group.
 pub const RECENT_MAX: usize = 5;
@@ -53,6 +54,13 @@ pub struct App {
     /// One-shot note for the hint bar, e.g. why a launch failed. Cleared by
     /// the next key.
     pub message: Option<String>,
+    /// The search text. Not empty means the menu shows search results.
+    pub query: String,
+    /// Results for `query`, best first.
+    pub hits: Vec<Hit>,
+    search: Search,
+    /// Selection when the search started, restored when it ends.
+    before_search: Option<RowKey>,
 }
 
 impl App {
@@ -70,6 +78,10 @@ impl App {
             cursors: HashMap::new(),
             pending: None,
             message: None,
+            query: String::new(),
+            hits: Vec::new(),
+            search: Search::new(),
+            before_search: None,
         };
         app.fix_selection();
         app
@@ -88,13 +100,36 @@ impl App {
             self.selected = self.cursors.get(HOME).cloned();
         }
         self.cursors.retain(|_, k| self.tree.get(&k.id).is_some());
+        if self.searching() {
+            self.refresh_hits();
+        }
         self.fix_selection();
     }
 
-    /// The rows of the current folder. Home starts with the Recent group:
-    /// apps and scripts from anywhere in the tree, newest first. The main
-    /// list below it never reorders, so it can be learned by position.
+    pub fn searching(&self) -> bool {
+        !self.query.is_empty()
+    }
+
+    /// The rows on screen. While searching, the hits. Otherwise the current
+    /// folder; Home starts with the Recent group: apps and scripts from
+    /// anywhere in the tree, newest first. The main list below it never
+    /// reorders, so it can be learned by position.
     pub fn rows(&self) -> Vec<Row> {
+        if self.searching() {
+            if self.hits.is_empty() {
+                return vec![Row::Header("No matches")];
+            }
+            return self
+                .hits
+                .iter()
+                .map(|h| {
+                    Row::Item(RowKey {
+                        id: h.id.clone(),
+                        recent: false,
+                    })
+                })
+                .collect();
+        }
         let mut rows = Vec::new();
         if self.folder == HOME {
             let recent: Vec<&str> = self
@@ -145,9 +180,53 @@ impl App {
             KeyCode::Home => self.move_by(isize::MIN),
             KeyCode::End => self.move_by(isize::MAX),
             KeyCode::Enter => self.activate(),
+            KeyCode::Esc if self.searching() => self.end_search(),
             KeyCode::Esc => self.back(),
+            KeyCode::Backspace if self.searching() => {
+                self.query.pop();
+                if self.query.is_empty() {
+                    self.end_search();
+                } else {
+                    self.refresh_hits();
+                }
+            }
+            // Any printable key types into the search. No focus step.
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.type_char(c);
+            }
             _ => {}
         }
+    }
+
+    fn type_char(&mut self, c: char) {
+        if !self.searching() {
+            // A leading space would match everything.
+            if c.is_whitespace() {
+                return;
+            }
+            self.before_search = self.selected.clone();
+        }
+        self.query.push(c);
+        self.refresh_hits();
+    }
+
+    /// Re-runs the search and selects the best hit.
+    fn refresh_hits(&mut self) {
+        self.hits = self.search.run(&self.tree, &self.history, &self.query);
+        self.selected = None;
+        self.fix_selection();
+    }
+
+    /// Clears the search and returns to the folder and row it started from.
+    fn end_search(&mut self) {
+        self.query.clear();
+        self.hits.clear();
+        self.selected = self.before_search.take();
+        self.fix_selection();
     }
 
     /// Moves the cursor by `delta` selectable rows, stopping at the ends.
@@ -173,7 +252,26 @@ impl App {
             return;
         };
         let id = item.id.clone();
-        match &item.action {
+        let action = item.action.clone();
+        // Values and choices adjust in place, so they keep the search.
+        // Anything else ends it: a folder opens, an app runs.
+        if !matches!(action, Action::Value(_) | Action::Choice(_)) && self.searching() {
+            self.end_search();
+            // B from a folder found by search lands on that folder.
+            if action == Action::Folder {
+                let parent = self.tree.parent(&id).unwrap_or(HOME).to_string();
+                let key = RowKey {
+                    id: id.clone(),
+                    recent: false,
+                };
+                if parent == self.folder {
+                    self.selected = Some(key);
+                } else {
+                    self.cursors.insert(parent, key);
+                }
+            }
+        }
+        match action {
             Action::Folder => self.enter(&id),
             // Adjusted with Left/Right, not A (step 7).
             Action::Value(_) | Action::Choice(_) => {}
@@ -185,8 +283,8 @@ impl App {
         }
     }
 
-    /// Button B. Goes up one folder; at Home it does nothing yet (it will
-    /// clear the search, step 5).
+    /// Button B outside a search. Goes up one folder; at Home it does
+    /// nothing.
     fn back(&mut self) {
         if self.folder == HOME {
             return;
@@ -417,5 +515,108 @@ mod tests {
         a.set_tree(Tree::build(merged, warnings));
         assert_eq!(a.folder, HOME);
         assert_eq!(sel(&a), "browser");
+    }
+
+    fn type_str(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn typing_searches_the_whole_tree() {
+        let mut a = app();
+        type_str(&mut a, "reb");
+        assert!(a.searching());
+        assert_eq!(a.folder, HOME);
+        assert_eq!(sel(&a), "reboot");
+        assert_eq!(a.rows().len(), a.hits.len());
+    }
+
+    #[test]
+    fn b_ends_search_where_it_started() {
+        let mut a = app();
+        go_to(&mut a, "settings");
+        press(&mut a, KeyCode::Enter);
+        go_to(&mut a, "volume");
+
+        type_str(&mut a, "chr");
+        assert_eq!(sel(&a), "browser");
+        press(&mut a, KeyCode::Esc);
+        assert!(!a.searching());
+        assert_eq!(a.folder, "settings");
+        assert_eq!(sel(&a), "volume");
+
+        // A second B is a normal back.
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.folder, HOME);
+    }
+
+    #[test]
+    fn backspace_to_empty_ends_search() {
+        let mut a = app();
+        press(&mut a, KeyCode::Down);
+        type_str(&mut a, "wi");
+        press(&mut a, KeyCode::Backspace);
+        assert_eq!(a.query, "w");
+        assert!(a.searching());
+        press(&mut a, KeyCode::Backspace);
+        assert!(!a.searching());
+        assert_eq!(sel(&a), "files");
+    }
+
+    #[test]
+    fn a_on_a_folder_hit_opens_it() {
+        let mut a = app();
+        type_str(&mut a, "power");
+        press(&mut a, KeyCode::Enter);
+        assert!(!a.searching());
+        assert_eq!(a.folder, "power");
+        // B from there goes to Home, where the search started.
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.folder, HOME);
+        assert_eq!(sel(&a), "power");
+    }
+
+    #[test]
+    fn a_on_an_app_hit_launches_and_clears() {
+        let mut a = app();
+        type_str(&mut a, "wifi");
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.pending.as_deref(), Some("wifi"));
+        assert!(!a.searching());
+        assert_eq!(a.folder, HOME);
+    }
+
+    #[test]
+    fn a_on_a_value_hit_keeps_the_search() {
+        let mut a = app();
+        type_str(&mut a, "volume");
+        press(&mut a, KeyCode::Enter);
+        assert!(a.searching());
+        assert!(a.pending.is_none());
+    }
+
+    #[test]
+    fn no_matches_has_no_selection() {
+        let mut a = app();
+        type_str(&mut a, "zzzz");
+        assert_eq!(a.rows(), [Row::Header("No matches")]);
+        assert!(a.selected_item().is_none());
+        press(&mut a, KeyCode::Enter);
+        assert!(a.pending.is_none());
+    }
+
+    #[test]
+    fn leading_space_and_ctrl_keys_are_not_typed() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char(' '));
+        assert!(!a.searching());
+        a.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(!a.searching());
+        // Spaces inside a query are kept: they separate words.
+        type_str(&mut a, "sh d");
+        assert_eq!(a.query, "sh d");
+        assert_eq!(sel(&a), "shutdown");
     }
 }

@@ -261,19 +261,28 @@ persists across reboots.
 
 ### Search
 
-- Typing any printable key starts a search. No focus step.
-- Searches the whole tree, flattened: apps, settings, power actions, user
-  items.
-- Fuzzy match (`nucleo`), ranked by score, recent items boosted.
-- Each result shows its parent, so duplicates stay apart:
+- Typing any printable key starts a search. No focus step. A leading space
+  is ignored; keys with Ctrl or Alt are never typed.
+- Searches the whole tree, flattened: folders, apps, settings, power
+  actions, user items. Labels only.
+- Fuzzy match (`nucleo-matcher`), case-insensitive. Each space-separated
+  word must match. No special syntax: `!`, `^`, `$` and `'` are plain
+  characters.
+- Ranked by match score; equal scores go to the most recently used, then
+  alphabetical.
+- Matched letters are highlighted. The search box shows the result count.
+- Each result shows its folder on the right (none for Home), so duplicates
+  stay apart:
   ```
-  > Reboot               Power
-    Raspberry Pi config  Settings
-    Brightness  75%      Settings
+  > Reboot                Power
+    Raspberry Pi config   Settings
+    Brightness  75%       Settings
   ```
-- A on a result acts as in the menu. A `folder` result opens it. A `value`
-  result adjusts in place.
-- B clears the search and returns to the folder you were in.
+- A on a result acts as in the menu and ends the search, except on a
+  `value` or `choice`, which adjusts in place and keeps it. A `folder`
+  result opens it; B from there lands on that folder in its parent.
+- B, or Backspace to an empty query, ends the search and returns to the
+  folder and row it started from.
 
 ### Script output
 

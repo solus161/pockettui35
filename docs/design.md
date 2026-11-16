@@ -482,7 +482,8 @@ Scaling is per app, as today: `--force-device-scale-factor` for Chromium,
 
 ## Boot
 
-1. Pi OS Lite, `waveshare-35dpi-5b` overlay in `config.txt`.
+1. Pi OS Lite with the touch overlay and USB host in `config.txt` (see
+   Device setup below).
 2. getty logs the session user in on tty1 with no prompt
    (`getty@tty1.service.d/pockettui35-autologin.conf`). The default target is
    `multi-user.target`; no display manager. The logind session this creates
@@ -498,6 +499,48 @@ Scaling is per app, as today: `--force-device-scale-factor` for Chromium,
      again and the launcher is back.
 5. At start-up the launcher draws its first frame, then puts back the saved
    power profile and resets keyd if a crash left the buttons raw.
+
+### Device setup
+
+Done by hand for now; the installer does not touch `config.txt` yet.
+Verified on the device, 2026-11-16.
+
+The touchscreen needs I²C and Waveshare's overlay. Without them no touch
+device exists, and touch in `wayland` apps silently does nothing.
+
+**Use `waveshare-35dpi-5b.dtbo` on the Pi 4B too.** Waveshare's overlays
+differ by the GT911's I²C address, not by board. `4b` probes only `0x14`;
+PocketTerm35 units answer at `0x5d`, which only `5b` declares. With `4b`
+the driver probes an empty address and touch fails. The file is in
+pocketterm35-os, `boot/`, with its checksum.
+
+```sh
+sudo install -m644 waveshare-35dpi-5b.dtbo /boot/firmware/overlays/
+sudo cp /boot/firmware/config.txt /boot/firmware/config.txt.bak
+sudo sed -i 's/^#dtparam=i2c_arm=on/dtparam=i2c_arm=on/' /boot/firmware/config.txt
+printf '[all]\ndtoverlay=waveshare-35dpi-5b\n' | sudo tee -a /boot/firmware/config.txt
+sudo reboot
+```
+
+`config.txt` should then hold, uncommented and in effect for every board:
+
+```
+dtparam=i2c_arm=on
+dtoverlay=waveshare-35dpi-5b
+dtoverlay=dwc2,dr_mode=host    # USB host for the RP2040 keyboard
+```
+
+The `[all]` matters: appended at the end of the file without it, the line
+can land inside a board filter such as `[cm5]` and be ignored. Check after
+the reboot:
+
+```sh
+grep -i -A4 goodix /proc/bus/input/devices   # a Goodix touchscreen
+dmesg | grep -i -E 'goodix|gt911'            # no I/O errors
+```
+
+cage then passes touch to the app with no further setup: `cage -- chromium`
+takes taps and scrolls.
 
 **Installer.** `sudo ./install.sh [--dry-run] [--user NAME] [--no-build]`,
 and `--uninstall`.
@@ -533,8 +576,11 @@ Left behind: sway, `pt35d`'s modes, placement and events, `pt35-bar`,
 1. Can RetroArch bind F16-F22? If not, `raw_buttons` maps them onto keys it
    can bind.
 2. What do L, R and Select do in the default layer?
-3. A D-pad mouse for apps that need a cursor: a uinput mouse in the launcher,
-   or touch only?
+3. A D-pad mouse for apps that need a cursor: decided against for now,
+   touch only. Touch works under cage once the overlay is in. If it comes
+   back: cage has no bindings or IPC and keyd cannot emit pointer events,
+   so it would be a uinput mouse in the launcher, fed by a keyd layer that
+   R toggles.
 4. File dialogs: GTK's built-in chooser without a portal. Good enough at
    640x480?
 5. Console font: which one, at what size? Terminus 8x16 gives 80x30 at

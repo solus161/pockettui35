@@ -83,6 +83,9 @@ The installer:
 - **Groups:** adds you to `video`, `dialout`, `input`, `render` and `audio`.
 - **Kernel:** hides the console cursor on the kernel command line, with a
   backup.
+- **Touchscreen:** installs the `waveshare-35dpi-5b` overlay (right for the
+  Pi 4B too) and turns on I²C in `config.txt`, with a backup. Lines already
+  there are left alone. Uninstalling keeps it.
 
 It refuses to run on anything but a Raspberry Pi unless you pass `--force`.
 Remove everything with `sudo ./install.sh --uninstall`.

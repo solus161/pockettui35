@@ -16,6 +16,9 @@ set -euo pipefail
 
 SHARE=/usr/share/pockettui35
 CMDLINE=/boot/firmware/cmdline.txt
+BOOTCFG=/boot/firmware/config.txt
+MARK_BEGIN='# pockettui35 >>>'
+MARK_END='# pockettui35 <<<'
 OLD_KEYD=/etc/keyd/pocketterm35.conf
 DRY=0; UNINSTALL=0; BUILD=1; FORCE=0; TARGET_USER="${SUDO_USER:-}"
 
@@ -62,6 +65,10 @@ if [ "$UNINSTALL" = 1 ]; then
   fi
   run "systemctl daemon-reload"
   run "keyd reload 2>/dev/null || true"
+  # The touchscreen setup is the device's, not the launcher's: it stays.
+  if [ -f "$BOOTCFG" ] && grep -qxF "$MARK_BEGIN" "$BOOTCFG"; then
+    msg "the touch overlay stays in $BOOTCFG (between the '$MARK_BEGIN' lines)"
+  fi
   msg "done. tty1 is a plain login again after a reboot."
   msg "a display manager disabled by the install (greetd, lightdm) stays off:"
   msg "  sudo systemctl enable greetd   # or lightdm, and set-default graphical.target"
@@ -134,11 +141,51 @@ run "systemctl daemon-reload"
 if [ -f "$CMDLINE" ]; then
   if ! grep -q 'vt.global_cursor_default=0' "$CMDLINE"; then
     msg "kernel command line: vt.global_cursor_default=0"
-    run "cp -n '$CMDLINE' '$CMDLINE.pockettui35.bak'"
+    run "[ -e '$CMDLINE.pockettui35.bak' ] || cp '$CMDLINE' '$CMDLINE.pockettui35.bak'"
     run "sed -i '1s/\$/ vt.global_cursor_default=0/' '$CMDLINE'"
   fi
 else
   warn "no $CMDLINE: add vt.global_cursor_default=0 to the kernel command line by hand"
+fi
+
+# Touchscreen (GT911) and USB host for the RP2040 keyboard. The 5b overlay
+# is right on the Pi 4B too: Waveshare's overlays differ by the touch
+# controller's I2C address (PocketTerm35 answers at 0x5d, only 5b has it),
+# not by board. Lines already in effect are left alone; the rest go in one
+# marked [all] block, so a board filter such as [cm5] cannot swallow them.
+if [ -f "$BOOTCFG" ]; then
+  msg "boot config: touchscreen overlay"
+  run "(cd '$SRC/assets/boot' && sha256sum -c --quiet SHA256SUMS)"
+  run "install -m644 '$SRC/assets/boot/waveshare-35dpi-5b.dtbo' '$(dirname "$BOOTCFG")/overlays/'"
+  # What the file says without our own block, as a reinstall would leave it.
+  outside=$(sed "/^$MARK_BEGIN\$/,/^$MARK_END\$/d" "$BOOTCFG")
+  want=()
+  for line in dtparam=i2c_arm=on dtoverlay=waveshare-35dpi-5b dtoverlay=dwc2,dr_mode=host; do
+    printf '%s\n' "$outside" | grep -qx "[[:space:]]*$line[[:space:]]*" || want+=("$line")
+  done
+  # The 3b and 4b overlays probe 0x14 only; next to 5b they would claim the
+  # same bus for nothing.
+  if printf '%s\n' "$outside" | grep -qE '^dtoverlay=waveshare-35dpi-(3b|4b)'; then
+    warn "a 3b/4b Waveshare overlay is set; commenting it out for 5b"
+    run "[ -e '$BOOTCFG.pockettui35.bak' ] || cp '$BOOTCFG' '$BOOTCFG.pockettui35.bak'"
+    run "sed -i -E 's/^dtoverlay=waveshare-35dpi-(3b|4b)/#pockettui35-off# &/' '$BOOTCFG'"
+  fi
+  if grep -qxF "$MARK_BEGIN" "$BOOTCFG" || [ ${#want[@]} -gt 0 ]; then
+    run "[ -e '$BOOTCFG.pockettui35.bak' ] || cp '$BOOTCFG' '$BOOTCFG.pockettui35.bak'"
+    run "sed -i '/^$MARK_BEGIN\$/,/^$MARK_END\$/d' '$BOOTCFG'"
+  fi
+  if [ ${#want[@]} -gt 0 ]; then
+    if [ "$DRY" = 1 ]; then
+      printf '    would append to %s:\n' "$BOOTCFG"
+      printf '      %s\n' "$MARK_BEGIN" '[all]' "${want[@]}" "$MARK_END"
+    else
+      printf '%s\n' "$MARK_BEGIN" '[all]' "${want[@]}" "$MARK_END" >> "$BOOTCFG"
+    fi
+  else
+    msg "  already set up"
+  fi
+else
+  warn "no $BOOTCFG: set up the touch overlay by hand (see docs/design.md, Device setup)"
 fi
 
 msg "done. Reboot: the launcher starts on tty1."

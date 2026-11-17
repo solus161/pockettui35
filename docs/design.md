@@ -502,8 +502,8 @@ Scaling is per app, as today: `--force-device-scale-factor` for Chromium,
 
 ### Device setup
 
-Done by hand for now; the installer does not touch `config.txt` yet.
-Verified on the device, 2026-11-16.
+The installer does this (see Installer below). By hand, verified on the
+device 2026-11-16:
 
 The touchscreen needs I²C and Waveshare's overlay. Without them no touch
 device exists, and touch in `wayland` apps silently does nothing.
@@ -512,7 +512,8 @@ device exists, and touch in `wayland` apps silently does nothing.
 differ by the GT911's I²C address, not by board. `4b` probes only `0x14`;
 PocketTerm35 units answer at `0x5d`, which only `5b` declares. With `4b`
 the driver probes an empty address and touch fails. The file is in
-pocketterm35-os, `boot/`, with its checksum.
+`assets/boot/`, with its checksum, copied unmodified from pocketterm35-os
+(which vendors Waveshare's `3.5HDMI_E_DTBO.zip`).
 
 ```sh
 sudo install -m644 waveshare-35dpi-5b.dtbo /boot/firmware/overlays/
@@ -557,6 +558,13 @@ and `--uninstall`.
   sddm if enabled.
 - **Kernel command line:** adds `vt.global_cursor_default=0` to
   `/boot/firmware/cmdline.txt`, with a backup.
+- **Touchscreen:** checks and installs `waveshare-35dpi-5b.dtbo` into
+  `/boot/firmware/overlays/`. Adds whichever of `dtparam=i2c_arm=on`, the
+  overlay and `dtoverlay=dwc2,dr_mode=host` are not already set, in one
+  `[all]` block between `# pockettui35 >>>` and `<<<` markers, with a
+  backup. Comments out a `3b` or `4b` Waveshare overlay. Running it again
+  changes nothing. `--uninstall` leaves this in place: it is the device's
+  setup, not the launcher's.
 - **Safety:** refuses to run on anything but a Raspberry Pi without
   `--force`, since it takes over tty1.
 
@@ -566,7 +574,7 @@ and `--uninstall`.
 - `backlight.rs`: the serial brightness protocol, non-blocking and bounded.
 - `scripts/pt35-ai`: the local AI agent, unchanged. DarkWire is a `tty` app.
 - The `keyd` config, extended with the layers above.
-- `boot/` overlay files and their checksums.
+- The `5b` overlay and its checksum, in `assets/boot/`.
 
 Left behind: sway, `pt35d`'s modes, placement and events, `pt35-bar`,
 `pt35-menu`, the layer-shell UI crate.

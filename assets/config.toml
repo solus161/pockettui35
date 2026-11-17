@@ -24,7 +24,7 @@
 label = "Chromium"
 type  = "app"
 kind  = "wayland"
-exec  = "chromium --ozone-platform=wayland --force-device-scale-factor=0.75"
+exec  = "chromium"
 
 [item.files]
 label = "Files"

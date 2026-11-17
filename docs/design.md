@@ -35,8 +35,8 @@ Carried over from pt35-desktop's `docs/hardware-facts.md`. Read that first.
 - Touch: GT911 on i2c-1 at 0x5d, `waveshare-35dpi-5b.dtbo`.
 - Input: RP2040 at USB `1209:0001`. One HID keyboard (QWERTY, D-pad, face
   buttons) plus a 5-button HID mouse. No gamepad device.
-- Patched firmware: A B X Y L R send F13-F18. Select and Start send F21 and
-  F22.
+- Patched firmware: L R X Y B A send F13-F18, in that order (A is F18).
+  Select and Start send F21 and F22.
 - Brightness: `B<0-100>` on `/dev/ttyACM0`, answered with `PT35 B=<n>`. Set
   the tty raw in-process, never through `stty`.
 - No battery reading. No backlight in sysfs.
@@ -429,7 +429,7 @@ unless it names a `parent`.
 label = "Browser"
 type  = "app"
 kind  = "wayland"
-exec  = "chromium --ozone-platform=wayland --force-device-scale-factor=0.75"
+exec  = "chromium"
 
 [item.files]
 label = "Files"
@@ -477,8 +477,12 @@ parent = "settings"
 - **No `icon` field.** The console font has no Nerd Font glyphs.
 - **v1: TOML editing only.** No in-launcher form for adding items.
 
-Scaling is per app, as today: `--force-device-scale-factor` for Chromium,
-`QT_SCALE_FACTOR` for Qt, `GDK_DPI_SCALE` for GTK3.
+Scaling is per app: `QT_SCALE_FACTOR` for Qt, `GDK_DPI_SCALE` for GTK3.
+Chromium is started plain. Under cage, `--force-device-scale-factor=0.75`
+(pt35-desktop's flag under sway) left its window short of the screen
+(seen on the device, 2026-11-17); plain `cage -- chromium` fills it. Make
+pages smaller with Chromium's own default zoom (Settings, Appearance,
+Page zoom), which it remembers.
 
 ## Boot
 

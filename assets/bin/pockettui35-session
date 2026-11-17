@@ -11,6 +11,12 @@
 #   back.
 set -u
 
+# The profile hook checks this. Everything started from here inherits it, so
+# a login shell the launcher runs (the Terminal item, `sh -l` in a script)
+# is a plain shell, not a second launcher. The maintenance shell below gets
+# it too.
+export PT35_NO_LAUNCHER=1
+
 quick_fails=0
 while :; do
   started=$(date +%s)
@@ -32,5 +38,4 @@ while :; do
   sleep 1
 done
 
-# The profile hook checks this, so the shell does not start the launcher.
-PT35_NO_LAUNCHER=1 exec "${SHELL:-/bin/sh}" -l
+exec "${SHELL:-/bin/sh}" -l

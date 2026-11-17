@@ -12,6 +12,9 @@
 #
 # Needs the patched keyboard firmware (F13-F22 on the buttons); flash it
 # with pt35-kbd from pocketterm35-os first.
+
+# `sh install.sh` runs dash, which ignores the #! line; this script needs bash.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
 
 SHARE=/usr/share/pockettui35
